@@ -11,6 +11,12 @@
 --  * anything beyond 16 simultaneous colors falls back to the nearest
 --    currently-assigned color.
 -- Slot assignments are sticky between frames to avoid palette flicker.
+-- The first time a slot of a terminal is overridden, the terminal's own
+-- color for it is saved; giving the slot back (restore, or a native color
+-- needing it) writes that color back, so a palette the user or another
+-- program set survives a Basalt app. A slot that shows one of Basalt's own
+-- custom colors (a window created while Basalt held slots of its parent
+-- copies them) saves the color that was behind it instead.
 
 ---@alias PaletteRGB [number, number, number]
 ---@alias PaletteTranslationMap table<string, string>
@@ -192,7 +198,7 @@ function palette.windowTranslation(win)
         local ok, r, g, b = pcall(getPal, 2 ^ i)
         if ok and type(r) == "number" and type(g) == "number"
             and type(b) == "number" then
-            local nr, ng, nb = palette.getRGB(i)
+            local nr, ng, nb = palette.getRGB(2 ^ i)
             if math.abs(r - nr) + math.abs(g - ng) + math.abs(b - nb) > 0.004 then
                 if not translate then
                     translate = {}
@@ -213,11 +219,138 @@ end
 
 ---@class Mapper
 ---@field term PaletteTerminal Terminal controlled by this mapper
+---@field key any Identity of the physical terminal (see terminalKey)
 ---@field overridden table<integer, integer> Registry index loaded into each overridden slot
 ---@field prevSlot table<integer, integer> Previous hardware slot per registry index
 ---@field prevMap PaletteTranslationMap Previous byte-to-blit translation
 local Mapper = {}
 Mapper.__index = Mapper
+
+---@class PaletteSavedSlots
+---@field rgb table<integer, PaletteRGB> Terminal color of each slot before Basalt overrode it
+---@field holders table<integer, integer> Number of mappers overriding each slot
+
+-- Pre-Basalt slot colors per terminal. Shared by every mapper on the same
+-- terminal (several frames, or a frame rebound with setTerm), so a slot is
+-- saved once, while it still holds the terminal's own color, and written
+-- back only when the last mapper overriding it lets go.
+---@type table<any, PaletteSavedSlots>
+local savedSlots = setmetatable({}, { __mode = "k" })
+
+-- The pre-Basalt color behind each custom color Basalt has loaded into a
+-- slot, on any terminal: behind[slot][registry index] = rgb. A CC window
+-- copies its parent's palette when it is created, so a window created
+-- while Basalt holds slots of its parent starts with Basalt's colors (and
+-- a visible window writes its palette through to the parent). Kept after
+-- the slot is given back, since the window keeps its copy. Not per
+-- terminal: a window and its parent have different keys, and a window
+-- cannot name its parent. Two terminals with different own colors behind
+-- the same custom color in the same slot share the last one saved.
+---@type table<integer, table<integer, PaletteRGB>>
+local behind = {}
+for i = 0, 15 do behind[i] = {} end
+
+--- Identity of the screen behind a terminal object. Every peripheral.wrap()
+--- of a monitor is a new table, so monitors are keyed by peripheral name.
+---@param t PaletteTerminal Terminal-like object
+---@return any key
+local function terminalKey(t)
+    ---@diagnostic disable-next-line: undefined-field
+    if t.setTextScale and peripheral and peripheral.getName then
+        local ok, name = pcall(peripheral.getName, t)
+        if ok and type(name) == "string" then return "peripheral:" .. name end
+    end
+    return t
+end
+
+--- Reads one palette slot of a terminal; CC's default when it can't be read.
+---@param t PaletteTerminal Terminal-like object
+---@param slot integer Palette slot 0-15
+---@return PaletteRGB rgb
+local function readSlot(t, slot)
+    local getPal = t.getPaletteColour or t.getPaletteColor
+    if getPal then
+        local ok, r, g, b = pcall(getPal, 2 ^ slot)
+        if ok and type(r) == "number" and type(g) == "number"
+            and type(b) == "number" then
+            return { r, g, b }
+        end
+    end
+    local n = reg[slot]
+    return { n[1], n[2], n[3] }
+end
+
+--- The terminal's own color for a slot that no mapper on it holds: what
+--- the slot shows, or, when that is a custom color Basalt loaded into the
+--- slot (a window copies its parent's palette, Basalt's colors included),
+--- the color behind it.
+---@param t PaletteTerminal Terminal-like object
+---@param slot integer Palette slot 0-15
+---@return PaletteRGB rgb
+local function ownColor(t, slot)
+    local shown = readSlot(t, slot)
+    -- the closest custom color within about one 8-bit step
+    local found, bestD = nil, 3 * 0.003 * 0.003
+    for i, rgb in pairs(behind[slot]) do
+        local c = reg[i]
+        local dr, dg, db = c[1] - shown[1], c[2] - shown[2], c[3] - shown[3]
+        local d = dr * dr + dg * dg + db * db
+        if d < bestD then found, bestD = rgb, d end
+    end
+    if found then return { found[1], found[2], found[3] } end
+    return shown
+end
+
+--- Writes a palette slot, taking it over for this mapper first if needed.
+---@param self Mapper
+---@param setPal fun(color: number, r: number, g: number, b: number)
+---@param slot integer Palette slot 0-15
+---@param idx integer Registry index to load into the slot
+local function override(self, setPal, slot, idx)
+    local first = self.overridden[slot] == nil
+    local rec = savedSlots[self.key]
+    -- read before writing; nobody else holds the slot, so it still shows
+    -- the terminal's own color (or Basalt's, in a window's copy)
+    local original = first and not (rec and rec.rgb[slot])
+        and ownColor(self.term, slot)
+    local c = reg[idx]
+    setPal(2 ^ slot, c[1], c[2], c[3])
+    if first then
+        if not rec then
+            rec = { rgb = {}, holders = {} }
+            savedSlots[self.key] = rec
+        end
+        if original then rec.rgb[slot] = original end
+        rec.holders[slot] = (rec.holders[slot] or 0) + 1
+    end
+    behind[slot][idx] = rec and rec.rgb[slot] or behind[slot][idx]
+    self.overridden[slot] = idx
+end
+
+--- Lets go of an overridden slot. The saved color is written back when no
+--- other mapper on the terminal still overrides the slot, or always when
+--- this mapper needs the slot's own color on screen.
+---@param self Mapper
+---@param setPal? fun(color: number, r: number, g: number, b: number)
+---@param slot integer Palette slot 0-15
+---@param always boolean Write the saved color even if the slot is shared
+local function release(self, setPal, slot, always)
+    local key = self.key
+    local rec = savedSlots[key]
+    local holders = rec and rec.holders[slot] or 1
+    local rgb = rec and rec.rgb[slot] or reg[slot]
+    if setPal and (always or holders <= 1) then
+        setPal(2 ^ slot, rgb[1], rgb[2], rgb[3])
+    end
+    self.overridden[slot] = nil
+    if not rec then return end
+    if holders > 1 then
+        rec.holders[slot] = holders - 1
+    else
+        rec.holders[slot], rec.rgb[slot] = nil, nil
+        if next(rec.holders) == nil then savedSlots[key] = nil end
+    end
+end
 
 --- Creates a palette mapper for one terminal.
 ---@param t PaletteTerminal Terminal-like object
@@ -225,6 +358,7 @@ Mapper.__index = Mapper
 function palette.newMapper(t)
     return setmetatable({
         term = t,
+        key = terminalKey(t),
         overridden = {},
         prevSlot = {},
         prevMap = {},
@@ -254,9 +388,9 @@ function Mapper:build(used)
         if used[i] then
             occupant[i] = i
             if setPal and self.overridden[i] then
-                local n = reg[i]
-                setPal(2 ^ i, n[1], n[2], n[3])
-                self.overridden[i] = nil
+                -- the native color needs its slot: give it the terminal's
+                -- own color back
+                release(self, setPal, i, true)
             end
         end
     end
@@ -275,9 +409,7 @@ function Mapper:build(used)
                 occupant[slot] = idx
                 self.prevSlot[idx] = slot
                 if self.overridden[slot] ~= idx then
-                    local c = reg[idx]
-                    setPal(2 ^ slot, c[1], c[2], c[3])
-                    self.overridden[slot] = idx
+                    override(self, setPal, slot, idx)
                 end
                 map[char(idx)] = HEXC[slot]
             end
@@ -339,15 +471,14 @@ function Mapper:build(used)
     return map, changed
 end
 
---- Restores terminal palette colors changed by this mapper.
+--- Gives every palette slot this mapper overrode back to the terminal:
+--- each slot gets the color it had before Basalt took it over (unless
+--- another mapper on the same terminal still uses the slot).
 function Mapper:restore()
     local t = self.term
     local setPal = t.setPaletteColour or t.setPaletteColor
-    if setPal then
-        for slot in pairs(self.overridden) do
-            local n = reg[slot]
-            setPal(2 ^ slot, n[1], n[2], n[3])
-        end
+    for slot in pairs(self.overridden) do
+        release(self, setPal, slot, false)
     end
     self.overridden, self.prevSlot, self.prevMap = {}, {}, {}
 end

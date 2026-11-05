@@ -4,9 +4,16 @@
 --   prog:execute("rom/programs/fun/worm.lua")
 --
 -- The program draws into an invisible window; its content is copied into
--- the render buffer every frame. Mouse events arrive element-relative when
--- the element is hit, keyboard events while it is focused, and every other
--- event (timers, redstone, ...) is forwarded by a scheduled pump coroutine.
+-- the render buffer every frame. The window starts with CC's default
+-- palette, so term.getPaletteColour in the program returns CC's colors:
+-- the program's native colors show as the terminal's own, and colors it
+-- sets with term.setPaletteColour show as RGB colors.
+-- Mouse events arrive element-relative when the element is hit, keyboard
+-- events while it is focused, and every other event (timers, redstone,
+-- ...) is forwarded by a scheduled pump coroutine. Ctrl+T (terminate)
+-- reaches the program while the element is focused in the main frame when
+-- Basalt runs with basalt.run({ onTerminate }) or is driven by
+-- basalt.update(). A plain basalt.run() ends the app on Ctrl+T.
 -- Fires "done"(ok, result) and "error"(err, traceback); without an error
 -- handler a crashing program takes down the app through the normal Basalt 2
 -- error screen (with the program's own traceback).
@@ -19,6 +26,7 @@ local palette = require("core/palette")
 local textutil = require("core/text")
 
 ---@class ProgramWindow : PaletteTerminal
+---@field setPaletteColour fun(color: number, r: number, g: number, b: number)
 ---@field getSize fun(): integer, integer
 ---@field reposition fun(x: number, y: number, width: number, height: number)
 ---@field getLine fun(y: number): string?, string?, string?
@@ -48,12 +56,14 @@ local textutil = require("core/text")
 local Program = class.create("Program", Element)
 
 -- events the element already receives through normal routing; everything
--- else is forwarded by the pump
+-- else is forwarded by the pump. terminate is keyboard input (Ctrl+T) and
+-- reaches only the focused Program, through handleTerminate.
 ---@type table<string, boolean>
 local ROUTED = {
     mouse_click = true, mouse_up = true, mouse_drag = true,
     mouse_scroll = true, mouse_move = true,
     key = true, key_up = true, char = true, paste = true,
+    terminate = true,
 }
 
 ---@type fun(self: Program, proc: ProgramProcess, event: string, ...: any)
@@ -249,6 +259,13 @@ function Program:execute(path, ...)
     file.close()
 
     local win = window.create(parentTerm, 1, 1, self.width, self.height, false)
+    -- window.create copies the parent's palette, which may hold Basalt's
+    -- RGB colors in some slots. Start from CC's colors instead: the
+    -- program's native colors then render as Basalt's native colors (the
+    -- terminal's own), and only colors the program sets are registered.
+    for i = 0, 15 do
+        win.setPaletteColour(2 ^ i, palette.getRGB(2 ^ i))
+    end
     local fn, err = load(content, "@/" .. resolved, nil, buildEnv(self, resolved, win))
     if not fn then
         error("Basalt Program: failed to load " .. resolved .. ": " .. tostring(err), 2)
@@ -357,6 +374,21 @@ function Program:handleKey(event, a, b)
     local proc = rawget(self, "_proc")
     if proc then resume(self, proc, event, a, b) end
     Element.handleKey(self, event, a, b)
+end
+
+--- Takes Ctrl+T while the element is focused (see Element:handleTerminate):
+--- Basalt calls this when a terminate event arrives under
+--- basalt.run({ onTerminate }) or basalt.update(). A running program gets
+--- the event (in it, os.pullEvent raises "Terminated", as in a shell) and
+--- Basalt passes it on no further: scheduled coroutines and the onTerminate
+--- of basalt.run do not see it. Without a running program the event goes
+--- on as usual.
+---@return boolean taken True when a running program got the event
+function Program:handleTerminate()
+    local proc = rawget(self, "_proc")
+    if not proc then return false end
+    resume(self, proc, "terminate")
+    return true
 end
 
 --- Stops the program before removing the element.

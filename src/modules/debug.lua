@@ -5,9 +5,12 @@
 --
 -- Standalone module: builds its overlay out of ordinary elements on the
 -- main frame and watches for its toggle key via a scheduled coroutine.
+-- Log lines are shown as written: a "{...}" line is never compiled as a
+-- reactive expression, whatever basalt.setReactiveStrings says.
 
 local require = ...
 local basalt = require("main")
+local reactive = require("core/reactive")
 
 local dbg = {}
 
@@ -22,7 +25,8 @@ local function refresh()
     local rows = HEIGHT - 1
     local offset = math.max(0, #lines - rows)
     for i = 1, rows do
-        rowLabels[i].text = lines[offset + i] or ""
+        -- logged values are data (often from outside the program)
+        rowLabels[i].text = reactive.literal(lines[offset + i] or "")
     end
 end
 
@@ -31,8 +35,12 @@ local function ensureOverlay()
     local main = basalt.getMainFrame()
     overlay = main:addFrame({
         x = 1,
-        y = "{parent.height - " .. (HEIGHT - 1) .. "}",
-        width = "{parent.width}",
+        -- functions, not "{...}" strings: those are stored as written while
+        -- basalt.setReactiveStrings(false) is in effect
+        y = function(self)
+            return rawget(self, "parent").height - (HEIGHT - 1)
+        end,
+        width = function(self) return rawget(self, "parent").width end,
         height = HEIGHT,
         z = 1000,
         visible = false,
@@ -101,7 +109,8 @@ end
 
 ensureOverlay()
 
--- watch for the toggle key; scheduled coroutines receive all events
+-- watch for the toggle key; scheduled coroutines receive all events.
+-- Ctrl+T under basalt.run({ onTerminate }) must not end the watcher.
 basalt.schedule(function()
     while true do
         ---@diagnostic disable-next-line: undefined-field
@@ -110,7 +119,7 @@ basalt.schedule(function()
             dbg.show()
         end
     end
-end)
+end, { ignoreTerminate = true })
 
 -- convenience: basalt.debug(...)
 basalt.debug = dbg.log

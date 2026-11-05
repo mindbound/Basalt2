@@ -1,4 +1,12 @@
 -- Reactive expressions: "{parent.width - 12}" compiles to a dynamic value.
+--
+-- A string assigned to a property is compiled when it starts with "{" and
+-- ends with "}" (except rawString properties such as Input.text). The
+-- expression is Lua code with access to self, parent and every named
+-- element, so text that comes from outside the program (files, network,
+-- chat, AI output) must not be compiled: turn compiling off for a Basalt
+-- instance with basalt.setReactiveStrings(false), or wrap one value in
+-- basalt.literal(str) to store it as written.
 
 local require = ...
 local palette = require("core/palette")
@@ -24,7 +32,21 @@ local palette = require("core/palette")
 ---@field parent? Container Current parent
 ---@field [string] any Named elements are resolved dynamically
 
+---@class ReactiveLiteral
+---@field value string The string, stored as written
+
 local reactive = {}
+
+-- Module state is per Basalt instance: every loaded Basalt has its own
+-- module cache (see init.lua).
+local enabled = true
+
+-- Recognized by the __basaltLiteral flag, so a marker made by another
+-- Basalt instance works too.
+local LiteralMeta = {
+    __basaltLiteral = true,
+    __tostring = function(marker) return marker.value end,
+}
 
 ---@type ReactiveHelpers
 local helpers = {
@@ -42,7 +64,58 @@ local helpers = {
     max = math.max,
 }
 
---- Compiles a {property/path/expression} string into a dynamic property value.
+--- Turns compiling of "{...}" strings on property assignment on or off.
+--- Off, such strings are stored as written. XML layouts stay reactive.
+---@param on boolean True compiles (the default), false stores as written
+function reactive.setEnabled(on)
+    enabled = on and true or false
+end
+
+--- Returns whether "{...}" strings are compiled on property assignment.
+---@return boolean enabled
+function reactive.isEnabled()
+    return enabled
+end
+
+--- Tests whether a value has the form of a reactive expression: a string
+--- that starts with "{" and ends with "}".
+---@param value any Candidate value
+---@return boolean expression
+function reactive.isExpression(value)
+    return type(value) == "string" and value:sub(1, 1) == "{"
+        and value:sub(-1) == "}"
+end
+
+--- Marks a string to be stored as written by a property assignment, even
+--- when reactive strings are on (the property holds the plain string).
+--- Values that are not strings are returned unchanged (only strings are
+--- ever compiled).
+---@param value any Usually a string from outside the program
+---@return ReactiveLiteral|any marker The marker, or value itself
+function reactive.literal(value)
+    if type(value) ~= "string" then return value end
+    return setmetatable({ value = value }, LiteralMeta)
+end
+
+--- Tests whether a value is a marker made by reactive.literal.
+---@param value any Candidate value
+---@return boolean literal
+function reactive.isLiteral(value)
+    local mt = type(value) == "table" and getmetatable(value)
+    return mt and mt.__basaltLiteral == true or false
+end
+
+--- Returns the string inside a reactive.literal marker, or value unchanged.
+---@param value any Candidate value
+---@return any value
+function reactive.unwrap(value)
+    local mt = type(value) == "table" and getmetatable(value)
+    if mt and mt.__basaltLiteral == true then return value.value end
+    return value
+end
+
+--- Compiles a {property/path/expression} string into a dynamic property
+--- value. This always compiles, whatever reactive.setEnabled says.
 ---@param str string Braced reactive expression
 ---@param element Element Expression owner
 ---@return ReactiveResolver resolver

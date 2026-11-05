@@ -7,10 +7,13 @@
 --
 -- Auto-positions in the parent's top-right corner unless x/y are set
 -- manually. Auto-hides after `duration` seconds (0 disables). Fires "hide".
+-- Messages are shown as written: a "{...}" message is never compiled as a
+-- reactive expression, whatever basalt.setReactiveStrings says.
 
 local require = ...
 local class = require("core/class")
 local Element = require("core/element")
+local reactive = require("core/reactive")
 local textutil = require("core/text")
 
 ---@class ToastColorPair
@@ -75,13 +78,16 @@ function Toast:setup()
 end
 
 --- Shows a toast. toastType picks the color pair (default/success/error/
---- warning/info); duration overrides self.duration for this toast.
+--- warning/info); duration overrides self.duration for this toast. The
+--- message is shown as written: a "{...}" message is not compiled as a
+--- reactive expression, also while basalt.setReactiveStrings is on.
 ---@param message string The message (word-wrapped to maxWidth)
 ---@param toastType? string Color scheme name, default "default"
 ---@param duration? number Seconds until auto-hide, 0 disables
 ---@return self
 function Toast:show(message, toastType, duration)
-    self.message = tostring(message)
+    -- text from the caller, often from outside the program: never compiled
+    self.message = reactive.literal(tostring(message))
     rawset(self, "_lines", textutil.wrap(self.message, self.maxWidth - 2))
     local palette = self.toastColors[toastType or "default"]
         or self.toastColors.default
@@ -95,12 +101,14 @@ function Toast:show(message, toastType, duration)
     rawset(self, "_showToken", token)
     if duration and duration > 0 then
         local basalt = require("main")
+        -- Ctrl+T under basalt.run({ onTerminate }) must not keep the toast
+        -- on screen; hide() removes it early
         basalt.schedule(function()
             sleep(duration)
             if rawget(self, "_showToken") == token then
                 self:hide()
             end
-        end)
+        end, { ignoreTerminate = true })
     end
     return self
 end

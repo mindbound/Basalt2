@@ -128,28 +128,96 @@ function List:removeItem(index)
     return self
 end
 
+---@param entry? CollectionEntry
+---@return boolean selectable
+local function canSelect(entry)
+    return entry ~= nil and entry.selectable ~= false
+        and entry.disabled ~= true and entry.separator ~= true
+end
+
+--- The selectable item nearest to index: searched in direction dir first,
+--- then the other way (separators and disabled items are stepped over).
+---@param self List
+---@param index integer
+---@param dir integer 1 or -1
+---@return integer? index
+local function nearestSelectable(self, index, dir)
+    local items = self.items
+    index = math.max(1, math.min(#items, index))
+    local last = dir > 0 and #items or 1
+    for i = index, last, dir do
+        if canSelect(items[i]) then return i end
+    end
+    for i = index - dir, dir > 0 and 1 or #items, -dir do
+        if canSelect(items[i]) then return i end
+    end
+    return nil
+end
+
+--- Scrolls the view for a navigation key: up/down by a line, pageUp and
+--- pageDown by a page, home/end to the top and bottom.
+---@param self List
+---@param key integer
+local function scrollByKey(self, key)
+    local offset, page = self.offset, math.max(1, self.height)
+    if key == keys.up then
+        self:setOffset(offset - 1)
+    elseif key == keys.down then
+        self:setOffset(offset + 1)
+    elseif key == keys.pageUp then
+        self:setOffset(offset - page)
+    elseif key == keys.pageDown then
+        self:setOffset(offset + page)
+    elseif key == keys.home then
+        self:setOffset(0)
+    elseif key == keys["end"] then
+        self:setOffset(maxOffset(self))
+    end
+end
+
 --- Keyboard navigation: arrows, home/end, pageUp/pageDown, enter activates.
+--- Separators and disabled items are stepped over; Home/End and the arrows
+--- still scroll a leading or trailing unselectable item into view. A list
+--- that is not selectable (or has no selectable item) scrolls instead:
+--- up/down by a line, pageUp/pageDown by a page, home/end to the top and
+--- bottom.
 ---@param event string The key event name
 ---@param a any Key code or character
 ---@param b? any Secondary key-event value
 function List:handleKey(event, a, b)
     if event == "key" and #self.items > 0 then
-        local selected = self.selected or 0
-        if a == keys.up then
-            self:selectItem(selected > 1 and selected - 1 or 1)
-        elseif a == keys.down then
-            self:selectItem(selected > 0 and math.min(#self.items, selected + 1) or 1)
-        elseif a == keys.home then
-            self:selectItem(1)
-        elseif a == keys["end"] then
-            self:selectItem(#self.items)
-        elseif a == keys.pageUp then
-            self:selectItem(math.max(1, (selected > 0 and selected or 1) - self.height))
-        elseif a == keys.pageDown then
-            self:selectItem(math.min(#self.items,
-                (selected > 0 and selected or 1) + self.height))
-        elseif a == keys.enter and selected > 0 then
-            self:activateItem(selected)
+        if not self.selectable then
+            scrollByKey(self, a)
+        else
+            local selected = self.selected or 0
+            local target, dir
+            if a == keys.up then
+                target, dir = selected > 1 and selected - 1 or 1, selected > 0 and -1 or 1
+            elseif a == keys.down then
+                target, dir = selected > 0 and math.min(#self.items, selected + 1) or 1, 1
+            elseif a == keys.home then
+                target, dir = 1, 1
+            elseif a == keys["end"] then
+                target, dir = #self.items, -1
+            elseif a == keys.pageUp then
+                target, dir = math.max(1, (selected > 0 and selected or 1) - self.height), -1
+            elseif a == keys.pageDown then
+                target, dir = math.min(#self.items,
+                    (selected > 0 and selected or 1) + self.height), 1
+            elseif a == keys.enter and selected > 0 then
+                self:activateItem(selected)
+            end
+            if target then
+                local index = nearestSelectable(self, target, dir)
+                if index then
+                    -- show the requested row (a header or footer that cannot
+                    -- be selected), then keep the selection itself in view
+                    self:scrollToItem(target)
+                    self:selectItem(index)
+                else
+                    scrollByKey(self, a)
+                end
+            end
         end
     end
     Collection.handleKey(self, event, a, b)

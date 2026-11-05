@@ -1,6 +1,7 @@
 local require = ...
 local class = require("core/class")
 local CollectionEntry = require("core/collectionentry")
+local reactive = require("core/reactive")
 
 --- Data accepted by collection-like elements when creating an entry.
 ---@class CollectionItem
@@ -77,6 +78,9 @@ local function fireChange(self, oldIndex, oldItem)
 end
 
 local function normalize(self, item)
+    -- items are never compiled, so a basalt.literal marker is just its
+    -- string (the marker table must not become the entry's data)
+    item = reactive.unwrap(item)
     if CollectionEntry.is(item) then
         if rawget(item, "_parent") == self then return item end
         item = item:getData()

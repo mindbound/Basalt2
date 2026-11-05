@@ -2,6 +2,7 @@
 
 local require = ...
 local class = require("core/class")
+local reactive = require("core/reactive")
 local state = require("core/state")
 local layout = require("core/layout")
 
@@ -534,6 +535,11 @@ function Element:unbind(propName, keepCurrent)
         rawget(self, "_p")[propName] = nil
         self:markDirty()
     else
+        -- the value is data: a "{...}" string read from a signal must not
+        -- be compiled by the assignment (the property holds the string)
+        if type(current) == "string" then
+            current = reactive.literal(current)
+        end
         self[propName] = current
     end
     return self
@@ -742,6 +748,18 @@ function Element:handleKey(event, a, b)
     elseif event == "paste" then
         self:fire("paste", a)
     end
+end
+
+--- Called when a terminate event (Ctrl+T) arrives while this element has
+--- the focus in the main frame. This happens only while Basalt runs with
+--- basalt.run({ onTerminate = fn }) or is driven by basalt.update(): a
+--- plain basalt.run() ends on Ctrl+T before any element sees the event.
+--- Return true to take the event: Basalt then passes it on no further
+--- (scheduled coroutines and onTerminate do not see it). The default
+--- returns false. Program overrides this to pass Ctrl+T to its program.
+---@return boolean taken True when the element took the event
+function Element:handleTerminate()
+    return false
 end
 
 return Element

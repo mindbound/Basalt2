@@ -27,12 +27,15 @@ local easings = {
 animation.easings = easings
 
 local active = {}
-local loopRunning = false
+-- The loop coroutine. A dead one (finished, or ended by an error in an
+-- onDone callback) is replaced when the next animation starts.
+local loop = nil
 
 local function startLoop()
-    if loopRunning then return end
-    loopRunning = true
-    basalt.schedule(function()
+    if loop and coroutine.status(loop) ~= "dead" then return end
+    -- Ctrl+T under basalt.run({ onTerminate }) must not end the loop:
+    -- an animation is stopped with its handle's cancel()
+    loop = basalt.schedule(function()
         while #active > 0 do
             sleep(0.05)
             local now = os.clock()
@@ -54,8 +57,7 @@ local function startLoop()
                 end
             end
         end
-        loopRunning = false
-    end)
+    end, { ignoreTerminate = true })
 end
 
 --- Tweens the given numeric properties to their target values.

@@ -161,6 +161,8 @@ function Image:play(fps)
     rawset(self, "_playToken", token)
 
     local basalt = require("main")
+    -- Ctrl+T under basalt.run({ onTerminate }) must not end playback;
+    -- stop() does
     basalt.schedule(function()
         while rawget(self, "_playToken") == token do
             local delay
@@ -177,7 +179,7 @@ function Image:play(fps)
                 end
             end
         end
-    end)
+    end, { ignoreTerminate = true })
     return self
 end
 

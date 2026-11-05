@@ -7,7 +7,10 @@
 --   end)
 --   cm:onSelect(function(_, index, item) ... end)
 --
--- Closes on selection, focus loss or escape.
+-- Closes on selection, focus loss or escape. Up/Down highlight an entry
+-- and Enter chooses it. Closing gives the focus back to the element that
+-- had it when the menu opened. A chosen entry runs (callback, "select")
+-- after the menu has closed, with the focus already back on that element.
 
 local require = ...
 local class = require("core/class")
@@ -17,6 +20,7 @@ local textutil = require("core/text")
 ---@class ContextMenu : Collection
 ---@field public separatorColor number Separator color
 ---@field private _highlighted? integer Highlighted item index
+---@field private _restoreFocus? Element|false Element that had the focus before openAt
 local ContextMenu = class.create("ContextMenu", Collection)
 
 --- Background color (false = transparent)
@@ -54,11 +58,38 @@ function ContextMenu:setup()
     self:on("click", function(s, _, _, y)
         local item = s.items[y]
         if item ~= nil and not isSeparator(item) and not item.disabled then
-            s:activateItem(y)
+            -- closed first: the item runs with the focus back on its owner,
+            -- so a dialog it opens gives the focus back there, and an
+            -- openAt() in it is not undone
             s:close()
+            s:activateItem(y)
         end
     end)
     self:on("blur", function(s) s:close() end)
+end
+
+---@param self ContextMenu
+---@return Element? focused
+local function focusedElement(self)
+    local root = self:getRoot()
+    return root.getFocused and root:getFocused() or nil
+end
+
+--- Whether an element can take the focus back: enabled, shown and still
+--- in the menu's UI tree.
+---@param el Element
+---@param root Element
+---@return boolean
+local function canTakeFocus(el, root)
+    if el.disabled then return false end
+    local node = el
+    while node do
+        if not node.visible then return false end
+        local parent = rawget(node, "parent")
+        if not parent then return node == root end
+        node = parent
+    end
+    return false
 end
 
 --- Opens the menu at parent-local coordinates, clamped into the parent.
@@ -71,16 +102,31 @@ function ContextMenu:openAt(x, y)
         x = math.max(1, math.min(x, parent.width - self.width + 1))
         y = math.max(1, math.min(y, parent.height - self.height + 1))
     end
+    local focused = focusedElement(self)
+    if focused ~= self then rawset(self, "_restoreFocus", focused or false) end
+    rawset(self, "_highlighted", nil)
     self.x, self.y = x, y
     self.visible = true
     self:focus()
     return self
 end
 
---- Hides the menu.
+--- Hides the menu. If it has the focus, the focus goes back to the
+--- element that had it when the menu opened.
 ---@return self
 function ContextMenu:close()
+    local restore = rawget(self, "_restoreFocus")
+    rawset(self, "_restoreFocus", nil)
+    rawset(self, "_highlighted", nil)
     self.visible = false
+    if focusedElement(self) == self then
+        local root = self:getRoot()
+        if restore and canTakeFocus(restore, root) then
+            restore:focus()
+        elseif root.setFocused then
+            root:setFocused(nil) -- keys must not reach the hidden menu
+        end
+    end
     return self
 end
 
@@ -89,15 +135,15 @@ end
 ---@param a any Key code or typed text
 ---@param b? any Secondary key-event value
 function ContextMenu:handleKey(event, a, b)
-    if event == "key" then
+    if event == "key" and self.visible then
         if a == keys.escape then
             self:close()
         elseif a == keys.enter then
             local hovered = rawget(self, "_highlighted")
             local item = hovered and self.items[hovered]
             if item and not isSeparator(item) and not item.disabled then
+                self:close() -- first, as for a click
                 self:activateItem(hovered)
-                self:close()
             end
         elseif a == keys.up or a == keys.down then
             local count = #self.items

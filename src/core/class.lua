@@ -23,6 +23,9 @@ local function resolveSpecValue(t, prop, value)
     elseif type(value) == "function" and not prop.rawFunction then
         value = state.withWatcher(t, value, t)
     end
+    -- basalt.literal markers that skipped assignment (class defaults set by
+    -- the theme module, state styles, values of signals) read as their text
+    if type(value) == "table" then value = reactive.unwrap(value) end
     syncMirroredState(t, prop, value)
     return value
 end
@@ -80,9 +83,14 @@ function class.create(name, parent)
         __newindex = function(t, k, v)
             local prop = c.__props[k]
             if prop then
-                if type(v) == "string" and not prop.rawString
-                    and v:sub(1, 1) == "{" and v:sub(-1) == "}" then
-                    v = reactive.compile(v, t)
+                if type(v) == "string" then
+                    if not prop.rawString and reactive.isEnabled()
+                        and reactive.isExpression(v) then
+                        v = reactive.compile(v, t)
+                    end
+                elseif type(v) == "table" then
+                    -- basalt.literal(str): stored as the plain string
+                    v = reactive.unwrap(v)
                 end
                 local p = rawget(t, "_p")
                 local old = p[k]
@@ -141,6 +149,10 @@ end
 --- as dynamic values.
 --- opts.rawString: "{...}" strings are stored as-is instead of being
 --- compiled as reactive expressions (for user-entered text).
+--- Other properties compile "{...}" strings on assignment, unless
+--- basalt.setReactiveStrings(false) turned that off or the value is wrapped
+--- in basalt.literal(str). Defaults are never compiled; a basalt.literal
+--- default is stored as its string.
 --- opts.state: mirrors the property's truthiness to a named element state.
 --- opts.stateWhen(value, self): custom predicate for the mirrored state.
 --- opts.styleable=false: state styles cannot override this property.
@@ -159,7 +171,7 @@ function class.property(c, propName, default, opts)
         stateWhen = opts.stateWhen,
         styleable = opts.styleable ~= false,
     }
-    c.__defaults[propName] = default
+    c.__defaults[propName] = reactive.unwrap(default)
 
     local cap = capitalize(propName)
     c["set" .. cap] = function(self, v)

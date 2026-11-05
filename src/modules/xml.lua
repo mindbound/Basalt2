@@ -18,6 +18,13 @@
 -- true/false, "#RRGGBB" -> basalt.rgb, "{...}" stays reactive, everything
 -- else is a string. on* attributes bind functions from the scope table.
 --
+-- XML is written by the app author, like code: "{...}" attribute values
+-- and text between tags are compiled as reactive expressions even when
+-- basalt.setReactiveStrings(false) turned that off for assignments
+-- (rawString properties such as Input.text still keep them as written).
+-- Never build XML from text that comes from outside the program; assign
+-- such text to the created elements instead.
+--
 -- With the Unicode Support mod, text between tags may use numeric
 -- character references: &#233; and &#xE9; give é, &#x2014; an em dash.
 -- Without the mod, text is kept as written. Attribute values are always
@@ -25,6 +32,7 @@
 
 local require = ...
 local palette = require("core/palette")
+local reactive = require("core/reactive")
 local textutil = require("core/text")
 
 local xml = {}
@@ -119,6 +127,20 @@ local function convert(v)
     return v -- includes reactive "{...}" strings
 end
 
+-- Assigns an XML value. "{...}" strings stay reactive when
+-- basalt.setReactiveStrings(false) is in effect: they are compiled here,
+-- for the properties whose assignment would compile them.
+local function assign(el, k, v)
+    if not reactive.isEnabled() and reactive.isExpression(v) then
+        local prop = rawget(el, "_class").__props[k]
+        if prop and not prop.rawString then
+            el[k] = reactive.compile(v, el)
+            return
+        end
+    end
+    el[k] = v
+end
+
 local function build(parent, nodes, scope)
     local created = {}
     for _, node in ipairs(nodes) do
@@ -138,12 +160,12 @@ local function build(parent, nodes, scope)
                 end
                 el[k](el, fn)
             else
-                el[k] = convert(v)
+                assign(el, k, convert(v))
             end
         end
 
         if node.text and el.text ~= nil and node.attrs.text == nil then
-            el.text = node.text
+            assign(el, "text", node.text)
         end
         if #node.children > 0 then
             build(el, node.children, scope)

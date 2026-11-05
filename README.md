@@ -128,6 +128,39 @@ text.pad(s, n, align)  -- cut or pad to n cells
 text.wrap(s, width)    -- word wrap by cells
 ```
 
+## Text from outside the program
+
+A string assigned to an element property that starts with `{` and ends
+with `}` is compiled as a Lua expression (a reactive string), with access
+to the element tree. Text from files, the network, chat or an AI model must
+never be compiled, so turn reactive strings off for such an app, or mark
+single values:
+
+```lua
+basalt.setReactiveStrings(false)    -- store every "{...}" string as written
+label.text = basalt.literal(reply)  -- or keep them on and mark one value
+```
+
+Dialog titles and messages, Toast messages, debug log lines and collection
+items (List, Menu, ...) are always shown as written. XML layouts are author
+code and stay reactive.
+
+## Ctrl+T
+
+`basalt.run()` ends the app on Ctrl+T. To use Ctrl+T to cancel work
+instead, pass `onTerminate`:
+
+```lua
+basalt.run({ onTerminate = function()
+    status.text = "Cancelled"  -- the loop keeps running until basalt.stop()
+end })
+```
+
+Ctrl+T then ends scheduled tasks that are waiting (in `sleep`,
+`os.pullEvent` or an http call), except those started with
+`basalt.schedule(fn, { ignoreTerminate = true })`. A focused `Program`
+passes it to its program, as multishell does.
+
 ## Testing
 
 The headless test suite runs in [CraftOS-PC](https://www.craftos-pc.cc/)

@@ -38,11 +38,27 @@ function BaseFrame:isKeyDown(keyCode)
 end
 
 --- Binds the root frame to a terminal-like object and resizes its buffer.
+--- Rebinding to another terminal gives the old terminal back the palette
+--- slots this frame overrode (as cleanup does); rebinding to the same
+--- terminal object keeps them. Two peripheral.wrap() tables of one monitor
+--- are different objects: the slots are given back and taken again on the
+--- next draw.
 ---@param t table Terminal or monitor redirect
 ---@return self
 function BaseFrame:setTerm(t)
+    local old = rawget(self, "_render")
+    local render = Render.new(t)
+    if old then
+        if rawget(self, "term") == t then
+            -- same terminal: keep the slots it holds and their saved colors
+            render.mapper = old.mapper
+        else
+            -- leaving a terminal gives its palette back
+            old.mapper:restore()
+        end
+    end
     rawset(self, "term", t)
-    rawset(self, "_render", Render.new(t))
+    rawset(self, "_render", render)
     local w, h = t.getSize()
     self._p.width, self._p.height = w, h
     self:markDirty()
@@ -200,7 +216,10 @@ function BaseFrame:handleEvent(event, a, b, c)
     end
 end
 
---- Restores the terminal (palette, colors, cursor).
+--- Restores the terminal (palette, colors, cursor). The palette slots get
+--- the colors they had before Basalt overrode them; a slot that another
+--- frame on the same terminal still uses is given back when that frame is
+--- cleaned up too.
 function BaseFrame:cleanup()
     local r = rawget(self, "_render")
     if r then r.mapper:restore() end
@@ -211,6 +230,12 @@ function BaseFrame:cleanup()
         t.clear()
         t.setCursorPos(1, 1)
         t.setCursorBlink(false)
+    end
+    if r then
+        -- the terminal was cleared: if this frame is drawn again (a second
+        -- basalt.run), repaint every line instead of diffing against it
+        r:resize(r.width, r.height)
+        self:markRenderDirty()
     end
 end
 

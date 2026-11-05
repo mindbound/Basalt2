@@ -10,8 +10,12 @@
 -- A `states` table defines property overrides while named states are active.
 --
 -- Values may be plain values or functions (dynamic values). Reactive
--- "{...}" strings only work in apply(), not in set() — defaults are shared
--- between elements, use a function instead.
+-- "{...}" strings are not allowed in set(): defaults are shared between
+-- elements, so use a function instead. apply() assigns each value like
+-- element.prop = value, so it compiles "{...}" strings per element only
+-- while basalt.setReactiveStrings is on (the default). With it off, they
+-- are stored as written. State styles never compile them. A function
+-- (fun(self) ... end) works in both modes.
 
 local require = ...
 local palette = require("core/palette")
