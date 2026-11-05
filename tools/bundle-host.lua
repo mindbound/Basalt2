@@ -2,7 +2,13 @@
 --
 -- The bundler uses the small CraftOS fs/shell API. This file provides the
 -- required subset with standard Lua so release bundles can be built without
--- running CraftOS-PC.
+-- running CraftOS-PC. It takes the bundler's arguments, for example:
+--   lua tools/bundle-host.lua out.lua --elements Frame,Label --modules none
+-- When the repository root is a git checkout and --commit or --repo is not
+-- given, it records in the bundle header the last commit that changed
+-- src, LICENSE or tools/bundle.lua (in a shallow clone: the tree id of
+-- src), marked when one of them has uncommitted changes, and the origin
+-- URL (see gitSource in tools/bundle.lua). A given --commit or --repo wins.
 
 local cliArgs = { ... }
 local separator = package.config:sub(1, 1)
@@ -105,6 +111,44 @@ shell = {
     end,
 }
 
+-- The value of a bundler option in the arguments (--name value or
+-- --name=value), or nil.
+local function optionValue(name)
+    for index, arg in ipairs(cliArgs) do
+        if arg == name then return cliArgs[index + 1] or "" end
+        local value = arg:match("^" .. (name:gsub("%-", "%%-")) .. "=(.*)$")
+        if value then return value end
+    end
+    return nil
+end
+
+-- The first output line of a git command in root, or nil.
+local function git(root, command)
+    local quiet = separator == "\\" and " 2>nul" or " 2>/dev/null"
+    local process = io.popen("git -C " .. shellQuote(root) .. " " .. command .. quiet, "r")
+    if not process then return nil end
+    local output = process:read("*a") or ""
+    process:close()
+    return output:match("^[^\r\n]+")
+end
+
 local runBundle = assert(loadfile(bundlePath))
+
+-- the root bundle.lua will use (its defaultRoot: the parent of tools/)
+local root = optionValue("--root") or getDir(toolsDir)
+if root == "" then root = "." end
+local needCommit, needRepo = not optionValue("--commit"), not optionValue("--repo")
+if exists(combine(root, ".git")) and (needCommit or needRepo) then
+    local commit, repository = runBundle("--lib").gitSource(function(command)
+        return git(root, command)
+    end)
+    if commit and needCommit then
+        cliArgs[#cliArgs + 1] = "--commit=" .. commit
+    end
+    if repository and needRepo then
+        cliArgs[#cliArgs + 1] = "--repo=" .. repository
+    end
+end
+
 local unpackArgs = table.unpack or unpack
 return runBundle(unpackArgs(cliArgs))

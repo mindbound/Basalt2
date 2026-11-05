@@ -46,6 +46,7 @@ local layout = require("core/layout")
 ---@field public foreground number Foreground color
 ---@field public name string Lookup name
 ---@field public disabled boolean Whether input is disabled
+---@field public focusOnClick boolean Whether a click takes the keyboard focus
 ---@field public parent? Container Owning container
 ---@field __name? string Runtime class name resolved through the class metatable
 ---@field find? fun(self: Element, name: string): Element? Optional container lookup
@@ -129,6 +130,18 @@ class.property(Element, "disabled", false, {
         end
     end,
 })
+--- Whether a click takes the keyboard focus. With false a click still
+--- presses the element and fires click, clickUp and drag, but the focus
+--- stays where it is: the focused element keeps its keys and gets no blur.
+--- Set it on a log, a popup or the root frame that must not take the keys
+--- from an input. Each element decides for itself (a child of such a frame
+--- still takes the focus); focus() from code still focuses the element.
+--- As nothing gets a blur, a popup that closes when it loses the focus (an
+--- open ContextMenu, Dropdown, ComboBox or a Menu's submenu) stays open and
+--- keeps the focus when the click lands on an element with focusOnClick
+--- false. If it must close, move the focus from that element's onClick
+--- (input:focus(), or frame:setFocused(nil)): the blur closes it.
+class.property(Element, "focusOnClick", true, { visual = false, styleable = false })
 
 class.combinedProperty(Element, "Position", { "x", "y" })
 class.combinedProperty(Element, "Size", { "width", "height" })
@@ -277,6 +290,21 @@ Element.__stateResolver = function(self, propName, c)
     return false
 end
 
+-- The "focused" state follows the root's focus, not the event alone.
+-- BaseFrame:setFocused fires "focus" only on an element that still holds
+-- the focus; this is a safeguard on top: a nested focus move or an event
+-- fired by hand can't leave the state set on an element without the
+-- focus. An element outside a frame (a root without getFocused) follows
+-- the event.
+local function syncFocusedState(self, fromEvent)
+    local root = self:getRoot()
+    local focused = fromEvent
+    if root.getFocused then focused = root:getFocused() == self end
+    if self:hasState("focused") ~= focused then
+        self:setState("focused", focused)
+    end
+end
+
 --- Per-instance initialization; subclasses override and call Element.setup.
 function Element:setup()
     rawset(self, "_states", {})
@@ -286,8 +314,8 @@ function Element:setup()
     rawset(self, "_stateSequenceN", 0)
     rawset(self, "_bindings", {})
 
-    self:on("focus", function(s) s:setState("focused", true) end)
-    self:on("blur", function(s) s:setState("focused", false) end)
+    self:on("focus", function(s) syncFocusedState(s, true) end)
+    self:on("blur", function(s) syncFocusedState(s, false) end)
 end
 
 --- Activates or deactivates a named state. State changes are idempotent.
@@ -706,7 +734,9 @@ function Element:render(buf)
 end
 
 --- Handles a positional mouse event in local coordinates.
---- Returns the consuming element, or nil to let it pass through.
+--- Returns the consuming element, or nil to let it pass through. A click
+--- is consumed by an element with a background or a click handler, which
+--- then takes the keyboard focus unless focusOnClick is false.
 ---@param event string Mouse event name
 ---@param btn number Mouse button or scroll direction
 ---@param x number Local x coordinate
@@ -717,7 +747,7 @@ function Element:handleMouse(event, btn, x, y)
     if event == "mouse_click" then
         if self.background or self._handlers.click then
             self:setState("pressed", true)
-            self:focus()
+            if self.focusOnClick then self:focus() end
             self:fire("click", btn, x, y)
             return self
         end

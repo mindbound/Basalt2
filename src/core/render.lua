@@ -89,6 +89,7 @@ for mask = 0, 31 do mosaicChars[mask] = string.char(128 + mask) end
 ---@field cursorY? number Requested terminal cursor y coordinate
 ---@field cursorBlink? boolean Requested terminal cursor blink state
 ---@field cursorColor? number Requested public cursor color
+---@field released? boolean Set by basalt.cleanup (the terminal was handed back); the next flush clears it
 local Render = {}
 Render.__index = Render
 
@@ -118,9 +119,28 @@ function Render:resize(w, h)
         self.text[y], self.fg[y], self.bg[y] = blankT, blankF, blankB
     end
     self.dirty = true
+    self.stack = {}
+    return self:resetClip()
+end
+
+--- Resets the origin and the clipping rectangle to the whole buffer. A
+--- render pass that ended with an error leaves them where it stopped.
+---@return self
+function Render:resetClip()
     self.ox, self.oy = 0, 0
-    self.cx1, self.cy1, self.cx2, self.cy2 = 1, 1, w, h
-    self.stack, self.stackN = {}, 0
+    self.cx1, self.cy1, self.cx2, self.cy2 = 1, 1, self.width, self.height
+    self.stackN = 0
+    return self
+end
+
+--- Forgets what the terminal shows: the next flush writes every line, and
+--- every palette slot it assigns, again (another program may have drawn
+--- on the terminal or changed its palette). The buffer is kept.
+---@return self
+function Render:invalidate()
+    self.prevText, self.prevFg, self.prevBg = {}, {}, {}
+    self.mapper:invalidate()
+    self.dirty = true
     return self
 end
 
@@ -612,6 +632,7 @@ end
 function Render:flush()
     if not self.dirty then return self end
     local t = self.term
+    self.released = nil
 
     local map, force
     if palette.hasVirtual() then

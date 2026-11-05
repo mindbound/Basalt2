@@ -83,7 +83,10 @@ function BaseFrame:draw()
     self._render:flush()
 end
 
---- Moves keyboard focus to an element, or clears it with nil.
+--- Moves keyboard focus to an element, or clears it with nil. The old
+--- element gets "blur", then the new one gets "focus" if it still holds
+--- the focus: a blur handler that moved the focus on (an onBlur that
+--- focuses its element again) has already given it to another element.
 ---@param el? Element New focused element
 function BaseFrame:setFocused(el)
     local old = rawget(self, "_focused")
@@ -93,7 +96,10 @@ function BaseFrame:setFocused(el)
     local r = rawget(self, "_render")
     if r then r:setCursor(1, 1, false) end
     if old and old ~= self then old:fire("blur") end
-    if el and el ~= self then el:fire("focus") end
+    -- a blur handler may have moved the focus on: then el no longer has it
+    if el and el ~= self and rawget(self, "_focused") == el then
+        el:fire("focus")
+    end
     self:markDirty()
 end
 

@@ -38,6 +38,7 @@ src/elements/Table.lua
 src/elements/TextBox.lua
 src/elements/Toast.lua
 src/elements/Tree.lua
+src/flimg.lua
 src/init.lua
 src/main.lua
 src/modules/animation.lua

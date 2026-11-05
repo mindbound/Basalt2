@@ -5,6 +5,13 @@
 -- "CC: Tweaked Unicode Support" mod a UTF-8 character is one cell, so text
 -- is measured with text.width, cut with text.sub and edited with
 -- text.splice. Typed and pasted text is converted with text.fromInput.
+--
+-- The cursor position runs from 1 (before the first character) to the
+-- text's width + 1 (after the last); setCursorPos and getCursorPos move
+-- and read it. Assigning text from code keeps the cursor where it is,
+-- clamped to the new text: a cursor past the new end goes to the end. To
+-- put the cursor after text set from code (a recalled history entry), call
+-- input:setCursorPos(math.huge) after the assignment.
 
 local require = ...
 local class = require("core/class")
@@ -13,6 +20,36 @@ local textutil = require("core/text")
 
 local cellWidth, cellSub = textutil.width, textutil.sub
 local normalize, splice = textutil.normalize, textutil.splice
+
+--- Clamps the cursor to a text of n cells. A cursor past the end goes to
+--- the end, and the text scrolls so the field shows as much of it as fits.
+---@param self Input
+---@param n integer Width of the text in cells
+local function clampCursor(self, n)
+    local cur = rawget(self, "_cursor")
+    if cur and cur > n + 1 then
+        rawset(self, "_cursor", n + 1)
+        rawset(self, "_scroll", math.max(0, n + 1 - self.width))
+    end
+end
+
+--- Scrolls the text sideways as little as possible so that the cursor cell
+--- is inside the field. If the field got wider since the last call, the
+--- scroll first goes down so the field shows as much text as fits: at most
+--- to the scroll that puts the cell after the text at the right edge.
+---@param self Input
+---@param n integer Width of the text in cells
+local function scrollToCursor(self, n)
+    local pos, scroll, w = rawget(self, "_cursor"), rawget(self, "_scroll"), self.width
+    local lastW = rawget(self, "_scrollWidth")
+    if lastW and w > lastW then
+        scroll = math.min(scroll, math.max(0, n + 1 - w))
+    end
+    if pos - scroll > w then scroll = pos - w end
+    if pos - scroll < 1 then scroll = pos - 1 end
+    rawset(self, "_scroll", scroll)
+    rawset(self, "_scrollWidth", w)
+end
 
 ---@class Input : Element
 ---@field public text string Current input value
@@ -25,6 +62,7 @@ local normalize, splice = textutil.normalize, textutil.splice
 ---@field onEnter fun(self: Input, fn: ElementEventHandler<Input>): Input
 ---@field package _cursor integer One-based insertion position (cell)
 ---@field package _scroll integer Horizontal text offset (cells)
+---@field package _scrollWidth? integer Field width the scroll was last fitted to
 local Input = class.create("Input", Element)
 
 --- Current input value (rawString: typed braces stay literal text)
@@ -37,13 +75,9 @@ class.property(Input, "text", "", {
             local stored = normalize(v)
             if stored ~= v then rawget(self, "_p").text = stored end
         end
-        -- keep cursor valid when text is replaced programmatically
-        local cur = rawget(self, "_cursor")
-        local n = v == nil and 0 or cellWidth(v)
-        if cur and cur > n + 1 then
-            rawset(self, "_cursor", n + 1)
-            rawset(self, "_scroll", math.max(0, n + 1 - self.width))
-        end
+        -- text replaced from code keeps the cursor, clamped to the new text
+        -- (upstream behaviour; setCursorPos moves it)
+        clampCursor(self, v == nil and 0 or cellWidth(v))
     end,
 })
 class.property(Input, "placeholder", "") -- shown while empty and unfocused
@@ -95,13 +129,33 @@ function Input:_moveCursor(pos)
     if pos < 1 then pos = 1 end
     if pos > n + 1 then pos = n + 1 end
     rawset(self, "_cursor", pos)
-
-    -- keep the cursor inside the visible slice
-    local w, scroll = self.width, self._scroll
-    if pos - scroll > w then scroll = pos - w end
-    if pos - scroll < 1 then scroll = pos - 1 end
-    rawset(self, "_scroll", scroll)
+    scrollToCursor(self, n) -- keep the cursor inside the visible slice
     self:markDirty()
+end
+
+--- Moves the insertion cursor. Positions are screen cells (one per UTF-8
+--- character with the Unicode Support mod): 1 is before the first
+--- character and the text's width + 1 after the last. Other values are
+--- clamped to that range, so math.huge moves the cursor to the end. The
+--- text scrolls sideways as little as possible to keep the cursor in view,
+--- as it does while typing. Fires no event.
+---@param pos number One-based cell position
+---@return self
+---@usage input.text = entry; input:setCursorPos(math.huge) -- cursor at the end
+function Input:setCursorPos(pos)
+    if type(pos) ~= "number" or pos ~= pos then
+        error("Basalt: cursor position must be a number", 2)
+    end
+    self:_moveCursor(math.floor(pos))
+    return self
+end
+
+--- Returns the insertion cursor position in cells: 1 before the first
+--- character, the text's width + 1 after the last.
+---@return integer pos One-based cell position
+function Input:getCursorPos()
+    clampCursor(self, cellWidth(self.text))
+    return rawget(self, "_cursor")
 end
 
 --- Inserts text at the cursor after applying pattern and length constraints.
@@ -173,6 +227,12 @@ function Input:render(buf)
     local focused = root.getFocused and root:getFocused() == self
     local value = currentText(self)
     local w = self.width
+    -- text from a binding or a function changes without the text property's
+    -- onChange, and the width can change: keep the cursor valid and in view
+    -- (a narrower field scrolls to the cursor, a wider one shows more text)
+    local n = cellWidth(value)
+    clampCursor(self, n)
+    scrollToCursor(self, n)
 
     if value == "" and not focused then
         buf:blit(1, 1, cellSub(self.placeholder, 1, w), self.placeholderColor, nil)

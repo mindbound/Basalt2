@@ -17,6 +17,10 @@
 -- program set survives a Basalt app. A slot that shows one of Basalt's own
 -- custom colors (a window created while Basalt held slots of its parent
 -- copies them) saves the color that was behind it instead.
+-- While the palette is suspended (palette.suspend, for a shell command that
+-- must see the terminal's own colors), every mapper gives its slots back
+-- and draws custom colors in the slot whose own color is nearest, without
+-- writing the palette.
 
 ---@alias PaletteRGB [number, number, number]
 ---@alias PaletteTranslationMap table<string, string>
@@ -223,8 +227,17 @@ end
 ---@field overridden table<integer, integer> Registry index loaded into each overridden slot
 ---@field prevSlot table<integer, integer> Previous hardware slot per registry index
 ---@field prevMap PaletteTranslationMap Previous byte-to-blit translation
+---@field rewrite? boolean Write every assigned slot again on the next build (see invalidate)
 local Mapper = {}
 Mapper.__index = Mapper
+
+-- Every mapper of this Basalt instance (weak), so palette.suspend reaches
+-- all of them, also those of frames created later.
+---@type table<Mapper, boolean>
+local mappers = setmetatable({}, { __mode = "k" })
+
+-- Nesting depth of palette.suspend; above 0 no mapper writes the palette.
+local suspendDepth = 0
 
 ---@class PaletteSavedSlots
 ---@field rgb table<integer, PaletteRGB> Terminal color of each slot before Basalt overrode it
@@ -356,13 +369,15 @@ end
 ---@param t PaletteTerminal Terminal-like object
 ---@return Mapper mapper
 function palette.newMapper(t)
-    return setmetatable({
+    local mapper = setmetatable({
         term = t,
         key = terminalKey(t),
         overridden = {},
         prevSlot = {},
         prevMap = {},
     }, Mapper)
+    mappers[mapper] = true
+    return mapper
 end
 
 ---@param a PaletteRGB First color
@@ -373,11 +388,64 @@ local function dist(a, b)
     return dr * dr + dg * dg + db * db
 end
 
+--- Whether the translation differs from the previous build's (a byte that
+--- was translated before now gives another blit character).
+---@param self Mapper
+---@param map PaletteTranslationMap New translation
+---@return boolean changed
+local function remember(self, map)
+    local changed = false
+    local prev = self.prevMap
+    for k, v in pairs(map) do
+        if prev[k] ~= nil and prev[k] ~= v then
+            changed = true
+            break
+        end
+    end
+    self.prevMap = map
+    return changed
+end
+
+--- The translation while the palette is suspended: native colors keep
+--- their slot, and each custom color is drawn in the slot whose own color
+--- (the terminal's color before Basalt, see ownColor) is nearest. Nothing
+--- is written to the palette.
+---@param self Mapper
+---@param used PaletteUsedColors Registry indices used by this frame
+---@return PaletteTranslationMap map
+local function buildSuspended(self, used)
+    local map = {}
+    for i = 0, 15 do map[char(i)] = HEXC[i] end
+    local own
+    for idx in pairs(used) do
+        if idx > 15 then
+            if not own then
+                -- read when needed: the colors a program left in the
+                -- palette meanwhile count too
+                own = {}
+                for s = 0, 15 do own[s] = ownColor(self.term, s) end
+            end
+            local c = reg[idx]
+            local best, bestD = 15, math.huge
+            for s = 0, 15 do
+                local d = dist(c, own[s])
+                if d < bestD then best, bestD = s, d end
+            end
+            map[char(idx)] = HEXC[best]
+        end
+    end
+    return map
+end
+
 --- Assigns hardware palette slots for the colors used by this frame.
 ---@param used PaletteUsedColors Registry indices used by this frame
 ---@return PaletteTranslationMap map Registry byte to terminal blit character
 ---@return boolean changed
 function Mapper:build(used)
+    if suspendDepth > 0 then
+        local map = buildSuspended(self, used)
+        return map, remember(self, map)
+    end
     local t = self.term
     local setPal = t.setPaletteColour or t.setPaletteColor
     local map = {}
@@ -405,10 +473,11 @@ function Mapper:build(used)
         local leftovers = {}
 
         if setPal then
+            local rewrite = self.rewrite
             local function assign(idx, slot)
                 occupant[slot] = idx
                 self.prevSlot[idx] = slot
-                if self.overridden[slot] ~= idx then
+                if rewrite or self.overridden[slot] ~= idx then
                     override(self, setPal, slot, idx)
                 end
                 map[char(idx)] = HEXC[slot]
@@ -459,28 +528,67 @@ function Mapper:build(used)
         end
     end
 
-    local changed = false
-    local prev = self.prevMap
-    for k, v in pairs(map) do
-        if prev[k] ~= nil and prev[k] ~= v then
-            changed = true
-            break
-        end
+    self.rewrite = nil
+    return map, remember(self, map)
+end
+
+--- Gives every overridden slot back (see release).
+---@param self Mapper
+local function releaseAll(self)
+    local t = self.term
+    local setPal = t.setPaletteColour or t.setPaletteColor
+    for slot in pairs(self.overridden) do
+        release(self, setPal, slot, false)
     end
-    self.prevMap = map
-    return map, changed
 end
 
 --- Gives every palette slot this mapper overrode back to the terminal:
 --- each slot gets the color it had before Basalt took it over (unless
 --- another mapper on the same terminal still uses the slot).
 function Mapper:restore()
-    local t = self.term
-    local setPal = t.setPaletteColour or t.setPaletteColor
-    for slot in pairs(self.overridden) do
-        release(self, setPal, slot, false)
-    end
+    releaseAll(self)
     self.overridden, self.prevSlot, self.prevMap = {}, {}, {}
+end
+
+--- Forgets what the terminal's palette shows: the next build writes every
+--- slot it assigns again, also those it already holds (another program may
+--- have changed them). The colors saved for the slots are kept.
+function Mapper:invalidate()
+    self.rewrite = true
+end
+
+--- Hands the palette back until palette.resume: every mapper gives back
+--- the slots it overrode (as restore does), and until then every build
+--- (also of mappers created meanwhile) maps custom colors to the slot
+--- whose own color is nearest, without writing the palette. Calls nest:
+--- only the first one gives the slots back. Slot assignments are kept, so
+--- after resume the custom colors get their old slots again where they
+--- are free.
+---@return boolean suspended True when this call handed the palette back
+function palette.suspend()
+    suspendDepth = suspendDepth + 1
+    if suspendDepth > 1 then return false end
+    for mapper in pairs(mappers) do
+        releaseAll(mapper)
+    end
+    return true
+end
+
+--- Ends one palette.suspend (all of them with all = true). When the last
+--- one ends, the next builds take slots for custom colors again. Without a
+--- suspend this does nothing.
+---@param all? boolean End every nested suspend at once
+---@return boolean resumed True when this call gave the palette to Basalt again
+function palette.resume(all)
+    if suspendDepth == 0 then return false end
+    suspendDepth = all and 0 or suspendDepth - 1
+    return suspendDepth == 0
+end
+
+--- Returns whether the palette is suspended (see palette.suspend).
+---@return boolean suspended
+function palette.isSuspended()
+    return suspendDepth > 0
 end
 
 return palette

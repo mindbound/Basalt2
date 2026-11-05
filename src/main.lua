@@ -148,6 +148,9 @@ end
 local frames = {}
 local mainFrame = nil
 local running = false
+-- true from the start to the end of basalt.run (running turns false at
+-- basalt.stop, before the loop's last draw)
+local inRun = false
 local schedules = {}
 -- options.onTerminate of the active basalt.run(); nil without one
 local onTerminate = nil
@@ -178,6 +181,21 @@ function basalt.getMainFrame()
     return mainFrame or basalt.createFrame()
 end
 
+-- Raises the error that ended a scheduled coroutine, with the coroutine's
+-- traceback (captured before it is lost). An error that has its traceback
+-- already (a draw that failed while basalt.run runs, see draw) is raised
+-- as it is.
+---@param co thread
+---@param err any
+local function raiseFrom(co, err)
+    if type(err) == "table" and err.__basaltError then error(err, 0) end
+    error(errors.wrap(err, debug.traceback(co)), 0)
+end
+
+-- Coroutines that basalt.schedule runs (keys: weak), so a draw error in
+-- one keeps its traceback (see onDrawError)
+local scheduledCos = setmetatable({}, { __mode = "k" })
+
 --- Runs a function in a coroutine driven by the event loop; blocking calls
 --- like sleep() are allowed inside. While basalt.run({ onTerminate = fn })
 --- runs, Ctrl+T reaches every scheduled coroutine, whatever event it waits
@@ -194,10 +212,9 @@ function basalt.schedule(fn, options)
         error("Basalt: schedule options must be a table", 2)
     end
     local co = coroutine.create(fn)
+    scheduledCos[co] = true
     local ok, filter = coroutine.resume(co)
-    if not ok then
-        error(errors.wrap(filter, debug.traceback(co)), 0)
-    end
+    if not ok then raiseFrom(co, filter) end
     schedules[#schedules + 1] = {
         co = co,
         filter = filter,
@@ -228,8 +245,7 @@ local function resumeSchedules(event, ...)
             if ok then
                 s.filter = filter
             elseif not (cancel and isTerminationError(filter)) then
-                -- capture the coroutine's stack before it is lost
-                error(errors.wrap(filter, debug.traceback(s.co)), 0)
+                raiseFrom(s.co, filter)
             end
         end
         if coroutine.status(s.co) == "dead" then
@@ -297,37 +313,6 @@ local function dispatch(event, a, b, c, ...)
     resumeSchedules(event, a, b, c, ...)
 end
 
-local function draw()
-    for i = 1, #frames do
-        frames[i]:draw()
-    end
-end
-
---- Feeds a single event through Basalt manually (alternative to run()).
---- "terminate" ends nothing here: the frames get it, a focused element can
---- take it (see Element:handleTerminate; a Program running a program
---- passes it to that program), and otherwise the scheduled coroutines that
---- wait for any event (or for "terminate") get it; one of them that ends
---- with "Terminated" raises like any other error. While
---- basalt.run({ onTerminate = fn }) runs, it acts exactly like Ctrl+T.
----@param event string The event name (e.g. "mouse_click", "key", "term_resize")
----@param ... any Additional event arguments
-function basalt.update(event, ...)
-    if event then dispatch(event, ...) end
-    draw()
-end
-
---- Stops the active basalt.run() event loop after the current event.
-function basalt.stop()
-    running = false
-end
-
-local function cleanup()
-    for i = 1, #frames do
-        frames[i]:cleanup()
-    end
-end
-
 -- A terminal may change size while no loop runs (between two
 -- basalt.run() calls): window.reposition queues no term_resize, and
 -- read() or sleep() between the runs drop the event. A frame whose render
@@ -341,6 +326,193 @@ local function syncFrameSizes()
             f:handleEvent("term_resize")
         end
     end
+end
+
+-- true while draw() runs (draw clears it on an error too)
+local drawing = false
+-- set by repaint() while a draw runs (from a draw callback): that draw
+-- ends with one more pass
+local repaintPending = false
+
+---@param onScreenOnly? boolean Skip frames handed back by cleanup
+local function drawFrames(onScreenOnly)
+    for i = 1, #frames do
+        local f = frames[i]
+        local r = rawget(f, "_render")
+        if not (onScreenOnly and r.released) then
+            -- a render pass that ended with an error (caught by an app
+            -- that drives Basalt with basalt.update) left its origin and
+            -- clip rectangle where it stopped
+            r:resetClip()
+            f:draw()
+        end
+    end
+end
+
+-- xpcall handler of draw(). While basalt.run runs, or when the draw runs
+-- in a scheduled coroutine (a repaint or palette call from a task), the
+-- error is wrapped with the traceback of where it was raised (a draw
+-- callback), as run's own handler does, so run's error screen and the
+-- task's err.trace still show that place. Otherwise it goes on as it was
+-- raised (basalt.update's error shape; a traceback taken around
+-- basalt.update then starts at Basalt's draw, but the message keeps the
+-- callback's position).
+local function onDrawError(e)
+    local scheduled = scheduledCos[coroutine.running() or false]
+    if (inRun or scheduled) and not (type(e) == "table" and e.__basaltError) then
+        return errors.wrap(e, debug.traceback(nil, 2))
+    end
+    return e
+end
+
+---@param onScreenOnly? boolean Skip frames handed back by cleanup
+local function draw(onScreenOnly)
+    drawing = true
+    local ok, err = xpcall(function()
+        drawFrames(onScreenOnly)
+        if repaintPending then
+            -- a draw callback asked for a repaint: the frames drawn before
+            -- it in this pass are drawn again too. Once: a repaint asked
+            -- for in this pass waits for the next draw.
+            repaintPending = false
+            syncFrameSizes()
+            drawFrames(true)
+        end
+    end, onDrawError)
+    -- also after an error, so that repaint and the palette calls act at
+    -- once again
+    drawing = false
+    repaintPending = false
+    if not ok then error(err, 0) end
+end
+
+--- Feeds a single event through Basalt manually (alternative to run()).
+--- Called without an event (basalt.update()), it only draws what changed.
+--- "terminate" ends nothing here: the frames get it, a focused element can
+--- take it (see Element:handleTerminate; a Program running a program
+--- passes it to that program), and otherwise the scheduled coroutines that
+--- wait for any event (or for "terminate") get it; one of them that ends
+--- with "Terminated" raises like any other error. While
+--- basalt.run({ onTerminate = fn }) runs, it acts exactly like Ctrl+T.
+---
+--- A term_resize resizes every root frame to its terminal, as in
+--- basalt.run. Errors reach the caller (there is no error screen): an
+--- error in an event handler or a draw callback as it was raised, an
+--- error in a scheduled coroutine (or in a Program without an error
+--- handler) as a table whose err field is the error and whose trace field
+--- is the coroutine's traceback (tostring gives the message). While
+--- basalt.run runs, an error in a draw callback is such a table too, with
+--- the callback's traceback, for run's error screen. Basalt can go on
+--- after the app handled it. An app that drives Basalt itself also needs
+--- basalt.cleanup (when it ends) and basalt.repaint.
+---@param event? string The event name, e.g. "mouse_click", "key", "term_resize" (nil: only draw what changed)
+---@param ... any Additional event arguments
+---@usage basalt.update(os.pullEventRaw())
+function basalt.update(event, ...)
+    if event then dispatch(event, ...) end
+    draw()
+end
+
+--- Stops the active basalt.run() event loop after the current event.
+function basalt.stop()
+    running = false
+end
+
+-- Gives every frame's terminal back (BaseFrame:cleanup: palette slots,
+-- colors, cursor, a cleared screen) and ends a palette suspension. A frame
+-- that has sent nothing to its terminal since the last cleanup is left
+-- alone, so a second cleanup does not clear what the app printed after
+-- the first one.
+local function cleanup()
+    for i = 1, #frames do
+        local f = frames[i]
+        local r = rawget(f, "_render")
+        if not (r and r.released) then
+            f:cleanup()
+            r = rawget(f, "_render")
+            if r then r.released = true end
+        end
+    end
+    palette.resume(true)
+end
+
+-- Frames take their terminal's size, forget what they sent to it and are
+-- drawn again in full: at once, except frames handed back by cleanup
+-- (the next basalt.update or basalt.run draws them). Asked for while a
+-- draw runs (from a draw callback), the frames are only marked here, and
+-- that draw ends with one more pass that does the rest (see draw).
+local function repaint()
+    -- a resize in the middle of a render pass would drop its buffer
+    if not drawing then syncFrameSizes() end
+    for i = 1, #frames do
+        local f = frames[i]
+        rawget(f, "_render"):invalidate()
+        f:markRenderDirty()
+    end
+    if drawing then
+        repaintPending = true
+    else
+        draw(true)
+    end
+end
+
+--- Gives the terminals back, as basalt.run does when it ends, for an app
+--- that drives Basalt itself with basalt.update: every palette slot Basalt
+--- changed gets its pre-Basalt color again, and each frame's terminal is
+--- cleared (white on black, cursor at 1,1, not blinking). It also ends a
+--- palette suspension (basalt.suspendPalette). Safe to call twice: a frame
+--- that has drawn nothing since the last cleanup is left alone, so text
+--- printed after the first call stays. The next basalt.update (or
+--- basalt.run) draws the frames again in full.
+---@usage basalt.cleanup()
+function basalt.cleanup()
+    cleanup()
+end
+
+--- Draws every frame again in full, now. Basalt only sends what changed,
+--- so after something else wrote to a terminal Basalt draws on (a program
+--- that used term.native(), a print, a changed palette slot), call this:
+--- Basalt forgets what it sent and writes every line and every palette
+--- slot it uses again. Frames also take their terminal's current size, as
+--- basalt.run does when it starts (for a term_resize that another program
+--- took). Frames given back by basalt.cleanup are drawn by the next
+--- basalt.update instead. Called while Basalt draws (from a draw
+--- callback), it is done by that draw when it has drawn every frame, so
+--- the frames drawn before the callback are drawn again too.
+---@usage basalt.repaint()
+function basalt.repaint()
+    repaint()
+end
+
+--- Gives the terminals their own colors back while Basalt keeps drawing,
+--- for example while a shell command runs that must see the normal
+--- palette (a multishell tab copies it, a program reads it). Every palette
+--- slot Basalt changed gets its pre-Basalt color again, and until
+--- basalt.resumePalette RGB colors (basalt.rgb) are drawn as the nearest
+--- of the 16 colors the terminal shows, without changing the palette;
+--- frames created meanwhile do the same. The frames are drawn again at
+--- once (see basalt.repaint), so the screen never shows RGB cells in a
+--- slot that holds another color. Calls nest: the palette comes back after
+--- as many basalt.resumePalette calls. basalt.cleanup ends a suspension.
+---@usage basalt.suspendPalette()
+--- shell.run(command)
+--- basalt.resumePalette()
+function basalt.suspendPalette()
+    if palette.suspend() then repaint() end
+end
+
+--- Ends a basalt.suspendPalette. When the last nested suspension ends, RGB
+--- colors take palette slots again and the frames are drawn again in full
+--- at once (as basalt.repaint does, which also covers what the command
+--- drew on the terminal). Does nothing when the palette is not suspended.
+function basalt.resumePalette()
+    if palette.resume() then repaint() end
+end
+
+--- Returns whether the palette is suspended (see basalt.suspendPalette).
+---@return boolean suspended
+function basalt.isPaletteSuspended()
+    return palette.isSuspended()
 end
 
 --- Starts the event loop; returns when basalt.stop() is called, on Ctrl+T
@@ -372,6 +544,7 @@ function basalt.run(options)
         error("Basalt: run option onTerminate must be a function", 2)
     end
     running = true
+    inRun = true
     onTerminate = handler
 
     local ok, err = xpcall(function()
@@ -393,6 +566,7 @@ function basalt.run(options)
     end)
 
     running = false
+    inRun = false
     onTerminate = nil
     cleanup()
     if not ok then

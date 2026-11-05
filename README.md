@@ -161,6 +161,128 @@ Ctrl+T then ends scheduled tasks that are waiting (in `sleep`,
 `basalt.schedule(fn, { ignoreTerminate = true })`. A focused `Program`
 passes it to its program, as multishell does.
 
+## Focus and the input cursor
+
+A click on an element with a background or a click handler gives it the
+keyboard focus. Set `focusOnClick = false` on an element that must leave
+the focus where it is, such as a log, a popup list or the root frame. It
+still gets its click, drag and scroll events, and `focus()` from code
+still works:
+
+```lua
+basalt.getMainFrame().focusOnClick = false  -- a click on the background keeps the focus
+log.focusOnClick = false
+```
+
+Such a click blurs nothing, so a popup that closes when it loses the
+focus (an open `ContextMenu`, `Dropdown`, `ComboBox` or a `Menu`'s
+submenu) stays open, and keeps the keys, when the click lands there. If
+it must close, move the focus from that element's `onClick`:
+
+```lua
+frame:onClick(function() input:focus() end)  -- the blur closes the popup
+```
+
+`input:setCursorPos(pos)` and `input:getCursorPos()` move and read an
+Input's cursor, in cells (1 is before the first character). Assigning
+`input.text` keeps the cursor where it is, clamped to the new text, so
+put it after a recalled entry like this:
+
+```lua
+input.text = history[i]
+input:setCursorPos(math.huge)
+```
+
+## Driving Basalt yourself
+
+An app with its own event loop can feed events to Basalt instead of
+calling `basalt.run()`:
+
+```lua
+local ok, err = pcall(function()
+    basalt.update()                        -- no event: just draw
+    while running do
+        local ev = table.pack(os.pullEventRaw())
+        -- look at ev first if you like, and keep it from Basalt
+        basalt.update(table.unpack(ev, 1, ev.n))
+    end
+end)
+basalt.cleanup()                           -- palette and terminal back
+if not ok then printError(tostring(err)) end
+```
+
+- `basalt.update(event, ...)` gives one event to the frames and the
+  scheduled tasks, then draws what changed. A `term_resize` resizes every
+  root frame, as in `basalt.run()`. Your loop decides what Ctrl+T does
+  (the `basalt.update` docs say where Basalt sends a `terminate` event).
+- Errors come out of `basalt.update`; there is no error screen. An error in
+  an event handler or a draw callback comes out as it was raised (a
+  traceback taken around `basalt.update` then starts at Basalt's draw; the
+  message keeps the callback's position). An error in a scheduled task is
+  a table: `err.err` is the error, `err.trace` the task's traceback (also
+  for a draw the task started), and `tostring(err)` gives the message.
+  Basalt can go on after you handled it.
+- `basalt.cleanup()` does what `basalt.run()` does when it ends: every
+  palette slot Basalt changed gets its earlier color back, and the
+  terminal is cleared. A second call leaves what you printed after the
+  first. The next `basalt.update` draws the frames again.
+- `basalt.repaint()` draws every frame again in full, at once. Basalt only
+  sends lines that changed, so call it after something else wrote to the
+  screen, for example a program that used `term.native()`. Called from a
+  draw callback, the running draw repaints every frame once it has drawn
+  them all. Frames also
+  take their terminal's current size, as `basalt.run()` does when it
+  starts (for a `term_resize` that another program took).
+
+## Handing the palette back
+
+Basalt shows `basalt.rgb` colors by changing palette slots. A shell
+command should see the terminal's own colors (a program may read them,
+and a multishell tab copies them). Hand them back while it runs:
+
+```lua
+basalt.suspendPalette()   -- the terminal's own colors are back
+shell.run(command)        -- the UI may keep drawing meanwhile
+basalt.resumePalette()    -- RGB colors again; everything is redrawn
+```
+
+While the palette is suspended, Basalt draws each RGB color as the
+nearest of the 16 colors the terminal shows and never changes the
+palette, also for frames created meanwhile, so a status line can keep
+ticking. Calls nest: the palette comes back after as many
+`resumePalette` calls (`basalt.isPaletteSuspended()` tells). Resume on
+the error path too; `basalt.cleanup()` ends a suspension.
+
+## Building bundles
+
+`lua tools/bundle-host.lua out.lua` (or `bundle` in CraftOS) builds the
+readable single-file bundle. To ship only part of Basalt, choose the
+elements and modules:
+
+```sh
+lua tools/bundle-host.lua ui.lua --elements Frame,Label,Input,List,Canvas --modules none
+```
+
+Elements that a chosen element needs (`List` needs `Collection`; `Dialog`
+needs `Frame`, `Label`, `Button` and `Input`) are added and reported. A
+module that needs elements you did not choose stops the build (`theme`
+needs all elements except `Canvas`). For a subset, each
+`Container.register("Name", require("elements/File"))` in `src/main.lua`
+must be a statement of its own; anything else stops the build, and the
+patched `main.lua` is compile-checked before anything is written.
+
+Every bundle starts with the MIT licence notice and records its source,
+its commit and the selection. The host runner fills these in from git.
+The commit is the last one that changed `src`, `LICENSE` or
+`tools/bundle.lua`, so commits that change only other files build the same
+bundle. A shallow clone (as in CI) can't tell that commit and records
+`not known (shallow clone); src tree <id>` instead. `(with uncommitted
+changes)` marks a build from a tree where those files differ from HEAD.
+`--commit <sha>` and `--repo <url>` override both values. The host runner
+needs Lua 5.1 or later. Bundled modules run in the environment the bundle
+is loaded with, as the source form does, so a `Program` element finds
+programs through `shell`.
+
 ## Testing
 
 The headless test suite runs in [CraftOS-PC](https://www.craftos-pc.cc/)
