@@ -6,15 +6,25 @@
 -- shared between all TextBoxes; the system clipboard arrives via the normal
 -- CC paste event). Typing, enter, paste, backspace and delete replace or
 -- remove the selection first. Escape collapses it.
+--
+-- Columns are screen cells (see core/text): with the "CC: Tweaked Unicode
+-- Support" mod a UTF-8 character is one cell. Lines are stored in their
+-- drawing form (text.normalize), measured with text.width, cut with
+-- text.sub and edited with text.splice; typed and pasted text is converted
+-- with text.fromInput.
 
 local require = ...
 local class = require("core/class")
 local Element = require("core/element")
 local itemview = require("core/itemview")
+local textutil = require("core/text")
+
+local cellWidth, cellSub = textutil.width, textutil.sub
+local normalize, splice = textutil.normalize, textutil.splice
 
 ---@class TextBoxPoint
 ---@field line integer Line index
----@field col integer One-based cursor column
+---@field col integer One-based cursor column (cell)
 
 ---@alias TextBoxMovement fun(self: TextBox, line: integer, col: integer, current: string): integer, integer
 
@@ -27,11 +37,11 @@ local itemview = require("core/itemview")
 ---@field public selectionForeground number Selection foreground
 ---@field package _lines string[] Editable lines
 ---@field package _curLine integer Cursor line
----@field package _curCol integer Cursor column
----@field package _viewX integer Horizontal viewport offset
+---@field package _curCol integer Cursor column (cell)
+---@field package _viewX integer Horizontal viewport offset (cells)
 ---@field package _viewY integer Vertical viewport offset
 ---@field private _selLine? integer Selection-anchor line
----@field private _selCol? integer Selection-anchor column
+---@field private _selCol? integer Selection-anchor column (cell)
 ---@field private _syncing? boolean Whether `text` is being synchronized internally
 ---@field private _mouseAnchor? TextBoxPoint Active mouse-selection anchor
 ---@field private _itemScrollDrag? integer Active scrollbar grab offset
@@ -47,9 +57,15 @@ class.property(TextBox, "text", "", {
     rawString = true, -- user-edited content must never compile as reactive
     onChange = function(self, v)
         if rawget(self, "_syncing") then return end
-        -- external assignment replaces the buffer
+        -- external assignment replaces the buffer; it is stored in its
+        -- drawing form (identity without the Unicode mod), so cells never
+        -- merge when lines are edited or joined
+        local value = type(v) == "string" and normalize(v) or v
+        if type(v) == "string" and value ~= v then
+            rawget(self, "_p").text = value
+        end
         local lines = {}
-        for line in (v .. "\n"):gmatch("(.-)\n") do
+        for line in (value .. "\n"):gmatch("(.-)\n") do
             lines[#lines + 1] = line
         end
         if #lines == 0 then lines = { "" } end
@@ -57,7 +73,7 @@ class.property(TextBox, "text", "", {
         local curLine = math.min(rawget(self, "_curLine") or 1, #lines)
         rawset(self, "_curLine", curLine)
         rawset(self, "_curCol",
-            math.min(rawget(self, "_curCol") or 1, #lines[curLine] + 1))
+            math.min(rawget(self, "_curCol") or 1, cellWidth(lines[curLine]) + 1))
         rawset(self, "_selLine", nil)
         rawset(self, "_selCol", nil)
     end,
@@ -155,7 +171,7 @@ end
 local function moveCursor(self, line, col)
     local lines = self._lines
     line = math.max(1, math.min(#lines, line))
-    col = math.max(1, math.min(#lines[line] + 1, col))
+    col = math.max(1, math.min(cellWidth(lines[line]) + 1, col))
     rawset(self, "_curLine", line)
     rawset(self, "_curCol", col)
     ensureView(self)
@@ -172,13 +188,13 @@ function TextBox:getSelection()
     ---@cast c2 integer
     local lines = self._lines
     if l1 == l2 then
-        return lines[l1]:sub(c1, c2 - 1)
+        return cellSub(lines[l1], c1, c2 - 1)
     end
-    local out = { lines[l1]:sub(c1) }
+    local out = { cellSub(lines[l1], c1) }
     for i = l1 + 1, l2 - 1 do
         out[#out + 1] = lines[i]
     end
-    out[#out + 1] = lines[l2]:sub(1, c2 - 1)
+    out[#out + 1] = cellSub(lines[l2], 1, c2 - 1)
     return table.concat(out, "\n")
 end
 
@@ -191,7 +207,8 @@ function TextBox:deleteSelection()
     ---@cast l2 integer
     ---@cast c2 integer
     local lines = self._lines
-    lines[l1] = lines[l1]:sub(1, c1 - 1) .. lines[l2]:sub(c2)
+    lines[l1] = normalize(cellSub(lines[l1], 1, c1 - 1))
+        .. normalize(cellSub(lines[l2], c2))
     for i = l2, l1 + 1, -1 do
         table.remove(lines, i)
     end
@@ -208,7 +225,7 @@ function TextBox:selectAll()
     rawset(self, "_selLine", 1)
     rawset(self, "_selCol", 1)
     local lines = self._lines
-    moveCursor(self, #lines, #lines[#lines] + 1)
+    moveCursor(self, #lines, cellWidth(lines[#lines]) + 1)
     return self
 end
 
@@ -235,14 +252,14 @@ function TextBox:getClipboard()
 end
 
 ---@param self TextBox
----@param str string Text to insert
+---@param str string Text to insert (already converted with text.fromInput)
 local function insertText(self, str)
+    str = normalize(str)
     self:deleteSelection()
     local lines = self._lines
     local line, col = self._curLine, self._curCol
-    local current = lines[line]
-    lines[line] = current:sub(1, col - 1) .. str .. current:sub(col)
-    rawset(self, "_curCol", col + #str)
+    lines[line] = splice(lines[line], col, col - 1, str)
+    rawset(self, "_curCol", col + cellWidth(str))
     syncText(self)
 end
 
@@ -255,7 +272,7 @@ local function pointFromMouse(self, x, y)
     local g = geometry(self)
     local line = math.max(1, math.min(#self._lines, g.offset + y))
     local col = math.max(1,
-        math.min(#self._lines[line] + 1, self._viewX + x))
+        math.min(cellWidth(self._lines[line]) + 1, self._viewX + x))
     return line, col
 end
 
@@ -335,11 +352,11 @@ local function initMovement()
     movementKeys = {
         [keys.left] = function(self, line, col)
             if col > 1 then return line, col - 1 end
-            if line > 1 then return line - 1, #self._lines[line - 1] + 1 end
+            if line > 1 then return line - 1, cellWidth(self._lines[line - 1]) + 1 end
             return line, col
         end,
         [keys.right] = function(self, line, col, current)
-            if col <= #current then return line, col + 1 end
+            if col <= cellWidth(current) then return line, col + 1 end
             if line < #self._lines then return line + 1, 1 end
             return line, col
         end,
@@ -347,7 +364,7 @@ local function initMovement()
         [keys.down] = function(self, line, col) return line + 1, col end,
         [keys.home] = function(self, line) return line, 1 end,
         [keys["end"]] = function(self, line, _, current)
-            return line, #current + 1
+            return line, cellWidth(current) + 1
         end,
         [keys.pageUp] = function(self, line, col)
             return line - self.height, col
@@ -364,7 +381,7 @@ end
 ---@param b? any Secondary key-event value
 function TextBox:handleKey(event, a, b)
     if event == "char" or event == "paste" then
-        insertText(self, a)
+        if type(a) == "string" then insertText(self, textutil.fromInput(a)) end
     elseif event == "key_up" then
         if a == keys.leftShift or a == keys.rightShift then
             rawset(self, "_shift", false)
@@ -404,8 +421,8 @@ function TextBox:handleKey(event, a, b)
                 line, col = self._curLine, self._curCol
                 current = lines[line]
             end
-            lines[line] = current:sub(1, col - 1)
-            table.insert(lines, line + 1, current:sub(col))
+            lines[line] = cellSub(current, 1, col - 1)
+            table.insert(lines, line + 1, cellSub(current, col))
             rawset(self, "_curLine", line + 1)
             rawset(self, "_curCol", 1)
             syncText(self)
@@ -413,25 +430,25 @@ function TextBox:handleKey(event, a, b)
             if self:deleteSelection() then
                 -- selection removal is the whole edit
             elseif col > 1 then
-                lines[line] = current:sub(1, col - 2) .. current:sub(col)
+                lines[line] = splice(current, col - 1, col - 1, "")
                 rawset(self, "_curCol", col - 1)
                 syncText(self)
             elseif line > 1 then
                 local previous = lines[line - 1]
                 rawset(self, "_curLine", line - 1)
-                rawset(self, "_curCol", #previous + 1)
-                lines[line - 1] = previous .. current
+                rawset(self, "_curCol", cellWidth(previous) + 1)
+                lines[line - 1] = normalize(previous) .. normalize(current)
                 table.remove(lines, line)
                 syncText(self)
             end
         elseif a == keys.delete then
             if self:deleteSelection() then
                 -- selection removal is the whole edit
-            elseif col <= #current then
-                lines[line] = current:sub(1, col - 1) .. current:sub(col + 1)
+            elseif col <= cellWidth(current) then
+                lines[line] = splice(current, col, col, "")
                 syncText(self)
             elseif line < #lines then
-                lines[line] = current .. lines[line + 1]
+                lines[line] = normalize(current) .. normalize(lines[line + 1])
                 table.remove(lines, line + 1)
                 syncText(self)
             end
@@ -446,7 +463,7 @@ end
 function TextBox:measure()
     local w = 1
     for _, line in ipairs(self._lines) do
-        w = math.max(w, #line)
+        w = math.max(w, cellWidth(line))
     end
     return w + 1, math.max(1, #self._lines)
 end
@@ -464,7 +481,7 @@ function TextBox:render(buf)
     for row = 1, self.height do
         local line = lines[g.offset + row]
         if not line then break end
-        buf:blit(1, row, line:sub(vx + 1, vx + tw), self.foreground, nil)
+        buf:blit(1, row, cellSub(line, vx + 1, vx + tw), self.foreground, nil)
     end
 
     -- selection overlay (the extra cell past a line end marks the newline)
@@ -475,13 +492,13 @@ function TextBox:render(buf)
             local line = lines[lineIndex]
             if line and lineIndex >= l1 and lineIndex <= l2 then
                 local startCol = (lineIndex == l1) and c1 or 1
-                local endCol = (lineIndex == l2) and (c2 - 1) or (#line + 1)
+                local endCol = (lineIndex == l2) and (c2 - 1) or (cellWidth(line) + 1)
                 local absStart = math.max(startCol, vx + 1)
                 local absEnd = math.min(endCol, vx + tw)
                 if absEnd >= absStart then
-                    local segment = line:sub(absStart, absEnd)
-                    segment = segment
-                        .. string.rep(" ", (absEnd - absStart + 1) - #segment)
+                    -- padded with a space for the newline cell
+                    local segment = textutil.pad(cellSub(line, absStart, absEnd),
+                        absEnd - absStart + 1)
                     buf:blit(absStart - vx, row, segment,
                         self.selectionForeground, self.selectionBackground)
                 end

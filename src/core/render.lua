@@ -5,13 +5,46 @@
 -- more than 16 colors in the buffer. On flush, only lines that actually
 -- differ from what the terminal currently shows are blitted, and color bytes
 -- are translated to blit hex chars through the palette mapper.
+--
+-- Positions are screen cells (see core/text). Each text row holds exactly
+-- `width` cells and each fg/bg row exactly `width` bytes, one per cell. On
+-- plain CC: Tweaked a cell is a byte; with the Unicode Support mod a text
+-- cell can be a multi-byte UTF-8 character, so text is measured with
+-- text.width, cut with text.sub and normalized before it goes into a row.
 
 local require = ...
 local palette = require("core/palette")
+local textutil = require("core/text")
 
-local rep, sub = string.rep, string.sub
+local rep, sub, byte = string.rep, string.sub, string.byte
 local floor = math.floor
 local charOf = palette.charOf
+local width, cellSub, normalize = textutil.width, textutil.sub, textutil.normalize
+local byteLen, byteCells, cellsOf = textutil.byteLen, textutil.isByteCells, textutil.cells
+local isUtf8 = textutil.isUtf8
+
+--- The text argument of a draw call: a string, or a number as a string.
+---@param s any
+---@return string
+local function textArg(s)
+    local t = type(s)
+    if t == "string" then return s end
+    if t == "number" then return tostring(s) end
+    error("Basalt: text must be a string, got " .. t, 3)
+end
+
+--- With the Unicode mod, a colour plane cut to the text's cell count, so a
+--- plane longer than its text (window.getLine rows whose cells merged, or
+--- planes sized with #) can't make a row longer than the screen.
+---@param plane? string
+---@param n integer Cells of the text
+---@return string?
+local function fitPlane(plane, n)
+    if plane and byteLen(plane) > n then
+        return sub(plane, 1, n)
+    end
+    return plane
+end
 
 ---@alias RenderLineBuffer string[]
 ---@alias RenderMosaic [string, string, string]
@@ -123,12 +156,28 @@ function Render:pop()
     return self
 end
 
----@param line string Original line
+--- Replaces n bytes of a colour plane row at byte x (one byte per cell).
+---@param line string Original plane row
 ---@param x number One-based replacement position
 ---@param str string Replacement span
+---@param n integer Its length in bytes
 ---@return string line
-local function splice(line, x, str)
-    return sub(line, 1, x - 1) .. str .. sub(line, x + #str)
+local function splicePlane(line, x, str, n)
+    return sub(line, 1, x - 1) .. str .. sub(line, x + n)
+end
+
+--- Replaces n cells of a text row at cell x with str (normalized, n cells).
+---@param line string Original text row
+---@param x number One-based replacement position (cell)
+---@param str string Replacement span
+---@param n integer Its width in cells
+---@return string line
+local function spliceText(line, x, str, n)
+    if not isUtf8() or (byteCells(line) and byteCells(str)) then
+        return sub(line, 1, x - 1) .. str .. sub(line, x + n)
+    end
+    local first, last = textutil.span(line, x, x + n - 1)
+    return sub(line, 1, first - 1) .. str .. sub(line, last + 1)
 end
 
 ---@param source string Source plane
@@ -137,9 +186,27 @@ end
 ---@return string merged
 local function mergeTransparent(source, underneath, mask)
     local out = {}
-    for i = 1, #source do
-        local marker = mask and mask:byte(i) or source:byte(i)
+    for i = 1, byteLen(source) do
+        local marker = mask and byte(mask, i) or byte(source, i)
         out[i] = marker == 0 and sub(underneath, i, i) or sub(source, i, i)
+    end
+    return table.concat(out)
+end
+
+--- mergeTransparent for the text plane, cell by cell: a source cell that is
+--- NUL (or masked out) shows the cell underneath.
+---@param source string Source text (normalized)
+---@param underneath string Existing text underneath the source
+---@param mask? string Explicit visibility mask (one byte per cell)
+---@return string merged
+local function mergeTransparentText(source, underneath, mask)
+    if not isUtf8() or (byteCells(source) and byteCells(underneath)) then
+        return mergeTransparent(source, underneath, mask)
+    end
+    local src, under, out = cellsOf(source), cellsOf(underneath), {}
+    for i = 1, #src do
+        local marker = mask and byte(mask, i) or byte(src[i], 1)
+        out[i] = marker == 0 and (under[i] or " ") or src[i]
     end
     return table.concat(out)
 end
@@ -215,22 +282,37 @@ function Render:write(x, y, str, fgChar, bgChar)
     local ay = y + self.oy
     if ay < self.cy1 or ay > self.cy2 then return self end
 
+    str = textArg(str)
+    local utf8 = isUtf8()
+    if utf8 then str = normalize(str) end
+    local cut = utf8 and cellSub or sub
     local ax = x + self.ox
-    local s, e = ax, ax + #str - 1
+    local s, e = ax, ax + (utf8 and width(str) or byteLen(str)) - 1
     local x1, x2 = self.cx1, self.cx2
     if s < x1 then
-        str = sub(str, x1 - s + 1)
+        str = cut(str, x1 - s + 1)
         s = x1
     end
     if e > x2 then
-        str = sub(str, 1, x2 - s + 1)
+        str = cut(str, 1, x2 - s + 1)
         e = x2
     end
     if s > e then return self end
 
-    self.text[ay] = splice(self.text[ay], s, str)
-    if fgChar then self.fg[ay] = splice(self.fg[ay], s, rep(fgChar, e - s + 1)) end
-    if bgChar then self.bg[ay] = splice(self.bg[ay], s, rep(bgChar, e - s + 1)) end
+    -- The text replaces as many cells as it has (s and e may be fractional)
+    if utf8 then
+        self.text[ay] = spliceText(self.text[ay], s, str, width(str))
+    else
+        self.text[ay] = splicePlane(self.text[ay], s, str, byteLen(str))
+    end
+    if fgChar then
+        local span = rep(fgChar, e - s + 1)
+        self.fg[ay] = splicePlane(self.fg[ay], s, span, byteLen(span))
+    end
+    if bgChar then
+        local span = rep(bgChar, e - s + 1)
+        self.bg[ay] = splicePlane(self.bg[ay], s, span, byteLen(span))
+    end
     self.dirty = true
     return self
 end
@@ -268,8 +350,9 @@ end
 ---@param backgrounds number[] Background color for each character
 ---@return self
 function Render:colorBlit(x, y, str, foregrounds, backgrounds)
+    str = textArg(str)
     local fg, bg = {}, {}
-    for i = 1, #str do
+    for i = 1, width(str) do
         fg[i] = colorChar(foregrounds[i])
         bg[i] = colorChar(backgrounds[i])
     end
@@ -297,8 +380,18 @@ end
 function Render:rawBlit(x, y, str, fgStr, bgStr)
     local ay = y + self.oy
     if ay < self.cy1 or ay > self.cy2 then return self end
+    str = textArg(str)
+    local utf8 = isUtf8()
+    local w
+    if utf8 then
+        str = normalize(str)
+        w = width(str)
+        fgStr, bgStr = fitPlane(fgStr, w), fitPlane(bgStr, w)
+    else
+        w = byteLen(str)
+    end
     local ax = x + self.ox
-    local s, e = ax, ax + #str - 1
+    local s, e = ax, ax + w - 1
     local x1, x2 = self.cx1, self.cx2
     local cutFront = s < x1 and (x1 - s) or 0
     local cutBack = e > x2 and (e - x2) or 0
@@ -306,13 +399,17 @@ function Render:rawBlit(x, y, str, fgStr, bgStr)
         s = s + cutFront
         e = e - cutBack
         if s > e then return self end
-        str = sub(str, 1 + cutFront, #str - cutBack)
-        if fgStr then fgStr = sub(fgStr, 1 + cutFront, #fgStr - cutBack) end
-        if bgStr then bgStr = sub(bgStr, 1 + cutFront, #bgStr - cutBack) end
+        str = (utf8 and cellSub or sub)(str, 1 + cutFront, w - cutBack)
+        if fgStr then fgStr = sub(fgStr, 1 + cutFront, byteLen(fgStr) - cutBack) end
+        if bgStr then bgStr = sub(bgStr, 1 + cutFront, byteLen(bgStr) - cutBack) end
     end
-    self.text[ay] = splice(self.text[ay], s, str)
-    if fgStr then self.fg[ay] = splice(self.fg[ay], s, fgStr) end
-    if bgStr then self.bg[ay] = splice(self.bg[ay], s, bgStr) end
+    if utf8 then
+        self.text[ay] = spliceText(self.text[ay], s, str, width(str))
+    else
+        self.text[ay] = splicePlane(self.text[ay], s, str, byteLen(str))
+    end
+    if fgStr then self.fg[ay] = splicePlane(self.fg[ay], s, fgStr, byteLen(fgStr)) end
+    if bgStr then self.bg[ay] = splicePlane(self.bg[ay], s, bgStr, byteLen(bgStr)) end
     self.dirty = true
     return self
 end
@@ -332,28 +429,45 @@ end
 function Render:maskedBlit(x, y, str, fgStr, bgStr, textMask, fgMask, bgMask)
     local ay, ax = y + self.oy, x + self.ox
     if ay < self.cy1 or ay > self.cy2 then return self end
-    local s, e = ax, ax + #str - 1
+    str = textArg(str)
+    local utf8 = isUtf8()
+    local w
+    if utf8 then
+        str = normalize(str)
+        w = width(str)
+        fgStr, bgStr = fitPlane(fgStr, w), fitPlane(bgStr, w)
+        textMask, fgMask, bgMask = fitPlane(textMask, w), fitPlane(fgMask, w), fitPlane(bgMask, w)
+    else
+        w = byteLen(str)
+    end
+    local s, e = ax, ax + w - 1
     local cutFront = s < self.cx1 and self.cx1 - s or 0
     local cutBack = e > self.cx2 and e - self.cx2 or 0
+    local function cut(plane)
+        return plane and sub(plane, 1 + cutFront, byteLen(plane) - cutBack)
+    end
     if cutFront > 0 or cutBack > 0 then
         s, e = s + cutFront, e - cutBack
         if s > e then return self end
-        str = sub(str, 1 + cutFront, #str - cutBack)
-        fgStr = fgStr and sub(fgStr, 1 + cutFront, #fgStr - cutBack)
-        bgStr = bgStr and sub(bgStr, 1 + cutFront, #bgStr - cutBack)
-        textMask = textMask and sub(textMask, 1 + cutFront, #textMask - cutBack)
-        fgMask = fgMask and sub(fgMask, 1 + cutFront, #fgMask - cutBack)
-        bgMask = bgMask and sub(bgMask, 1 + cutFront, #bgMask - cutBack)
+        str = (utf8 and cellSub or sub)(str, 1 + cutFront, w - cutBack)
+        fgStr, bgStr = cut(fgStr), cut(bgStr)
+        textMask, fgMask, bgMask = cut(textMask), cut(fgMask), cut(bgMask)
     end
-    local oldText = sub(self.text[ay], s, e)
-    self.text[ay] = splice(self.text[ay], s, mergeTransparent(str, oldText, textMask))
+    if utf8 then
+        local oldText = cellSub(self.text[ay], s, e)
+        local merged = mergeTransparentText(str, oldText, textMask)
+        self.text[ay] = spliceText(self.text[ay], s, merged, width(str))
+    else
+        local merged = mergeTransparent(str, sub(self.text[ay], s, e), textMask)
+        self.text[ay] = splicePlane(self.text[ay], s, merged, byteLen(merged))
+    end
     if fgStr then
-        local oldFg = sub(self.fg[ay], s, e)
-        self.fg[ay] = splice(self.fg[ay], s, mergeTransparent(fgStr, oldFg, fgMask))
+        local merged = mergeTransparent(fgStr, sub(self.fg[ay], s, e), fgMask)
+        self.fg[ay] = splicePlane(self.fg[ay], s, merged, byteLen(merged))
     end
     if bgStr then
-        local oldBg = sub(self.bg[ay], s, e)
-        self.bg[ay] = splice(self.bg[ay], s, mergeTransparent(bgStr, oldBg, bgMask))
+        local merged = mergeTransparent(bgStr, sub(self.bg[ay], s, e), bgMask)
+        self.bg[ay] = splicePlane(self.bg[ay], s, merged, byteLen(merged))
     end
     self.dirty = true
     return self
@@ -372,6 +486,9 @@ function Render:drawPixels(x, y, pixelWidth, pixelHeight, rows, paletteBytes)
     local cellWidth, cellHeight = math.ceil(pixelWidth / 2), math.ceil(pixelHeight / 3)
     for cellY = 1, cellHeight do
         local text, fg, bg, mask, rowHasPixels = {}, {}, {}, {}, false
+        -- With the Unicode mod, the text row underneath, split into cells
+        -- once per row (it only changes at the maskedBlit after this loop)
+        local underRow
         for cellX = 1, cellWidth do
             local absoluteX, absoluteY = x + cellX - 1 + self.ox, y + cellY - 1 + self.oy
             local visible = absoluteX >= self.cx1 and absoluteX <= self.cx2
@@ -379,7 +496,14 @@ function Render:drawPixels(x, y, pixelWidth, pixelHeight, rows, paletteBytes)
             local values, any = {}, false
             if visible then
                 local underneath, underBg = {}, sub(self.bg[absoluteY], absoluteX, absoluteX)
-                local underCode = self.text[absoluteY]:byte(absoluteX)
+                local underCode
+                if isUtf8() then
+                    underRow = underRow or cellsOf(self.text[absoluteY])
+                    local underCell = underRow[absoluteX] or " "
+                    underCode = byteLen(underCell) == 1 and byte(underCell) or nil
+                else
+                    underCode = byte(self.text[absoluteY], absoluteX)
+                end
                 if underCode and underCode >= 128 and underCode <= 159 then
                     local underFg, underMask = sub(self.fg[absoluteY], absoluteX, absoluteX), underCode - 128
                     local weights = { 1, 2, 4, 8, 16 }
@@ -478,7 +602,7 @@ end
 ---@param line string Registry-byte plane
 ---@param used PaletteUsedColors Destination set of registry indices
 local function scanLine(line, used)
-    for i = 1, #line do
+    for i = 1, byteLen(line) do
         used[line:byte(i)] = true
     end
 end

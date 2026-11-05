@@ -16,6 +16,7 @@ local class = require("core/class")
 local Element = require("core/element")
 local errors = require("core/errors")
 local palette = require("core/palette")
+local textutil = require("core/text")
 
 ---@class ProgramWindow : PaletteTerminal
 ---@field getSize fun(): integer, integer
@@ -76,6 +77,27 @@ local function syncWindowSize(self, proc, notify)
     proc.window.reposition(1, 1, width, height)
     if notify and resume then resume(self, proc, "term_resize") end
     return true
+end
+
+-- A window row in the form the render buffer takes. With the Unicode Support
+-- mod, getLine gives the cells' characters in the mod's form (UTF-8), where
+-- a CC-charset letter can still be a lone lead byte ("\233" for e-acute);
+-- normalize re-encodes it so it cannot merge with the text next to it. If
+-- the row then has another cell count than its colour planes (one byte per
+-- cell), it is cut or padded so the planes stay aligned. Without the mod the
+-- row is used as it is.
+---@param line string Text from window.getLine
+---@param plane string A colour plane of the row (one hex digit per cell)
+---@return string line
+local function fitLine(line, plane)
+    if not textutil.isUtf8() then return line end
+    local cells = textutil.byteLen(plane)
+    if textutil.isPlain(line) and textutil.byteLen(line) == cells then return line end
+    line = textutil.normalize(line)
+    if textutil.width(line) ~= cells then
+        line = textutil.pad(line, cells)
+    end
+    return line
 end
 
 ---@param self Program
@@ -326,7 +348,8 @@ function Program:setup()
     end)
 end
 
---- Handles keyboard input while focused.
+--- Handles keyboard input while focused. char and paste text is passed on
+--- unchanged, so the hosted program sees the native event payloads.
 ---@param event string The key event name (key, key_up, char, paste)
 ---@param a any Key code or typed text
 ---@param b? any Secondary key-event value
@@ -359,13 +382,14 @@ function Program:render(buf)
     -- renderer) get their colors registered instead of silently reset.
     local translate = palette.windowTranslation(win)
     for y = 1, height do
-        local text, fg, bg = win.getLine(y)
-        if text then
+        local line, fg, bg = win.getLine(y)
+        if line then
+            line = fitLine(line, fg)
             if translate then
-                buf:rawBlit(1, y, text,
+                buf:rawBlit(1, y, line,
                     (fg:gsub(".", translate)), (bg:gsub(".", translate)))
             else
-                buf:drawBlit(1, y, text, fg, bg)
+                buf:drawBlit(1, y, line, fg, bg)
             end
         end
     end

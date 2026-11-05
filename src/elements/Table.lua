@@ -12,6 +12,7 @@ local require = ...
 local class = require("core/class")
 local Element = require("core/element")
 local itemview = require("core/itemview")
+local textutil = require("core/text")
 
 ---@alias TableSortDirection "asc"|"desc"
 ---@alias TableRow any[]
@@ -74,7 +75,8 @@ local function normalizeColumns(columns)
     local result = {}
     for i, column in ipairs(columns) do
         if type(column) == "string" then
-            result[i] = { title = column, name = column, width = #column + 1 }
+            result[i] = { title = column, name = column,
+                width = textutil.width(column) + 1 }
         elseif type(column) == "table" then
             local title = column.title or column.name or ""
             result[i] = {
@@ -685,10 +687,10 @@ function Table:render(buf)
     for i, col in ipairs(cols) do
         local title = tostring(self.columns[i].title or self.columns[i].name or "")
         if i == sortCol then
-            title = title:sub(1, math.max(0, col.width - 1))
+            title = textutil.sub(title, 1, math.max(0, col.width - 1))
                 .. (sortAsc and "\30" or "\31")
         end
-        buf:blit(col.x, 1, title:sub(1, col.width),
+        buf:blit(col.x, 1, textutil.sub(title, 1, col.width),
             self.foreground, self.headerBackground)
     end
 
@@ -708,7 +710,7 @@ function Table:render(buf)
             local cell = rowData[i]
             if cell ~= nil then
                 buf:blit(col.x, row + 1,
-                    tostring(cell):sub(1, col.width), fg, bg)
+                    textutil.sub(tostring(cell), 1, col.width), fg, bg)
             end
         end
     end

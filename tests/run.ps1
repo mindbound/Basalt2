@@ -1,0 +1,37 @@
+# Run Basalt's headless test suite in CraftOS-PC.
+# Usage: .\tests\run.ps1 [-Suite test_text] [-Emulator path\to\CraftOS-PC_console.exe]
+#                         [-Data path\to\emulator-data-dir]
+# Give runs that happen at the same time their own -Data directory.
+param(
+  [string]$Suite = "",
+  [string]$Emulator = "CraftOS-PC_console.exe",
+  [string]$Data = ""
+)
+
+$ErrorActionPreference = "Stop"
+$repo = Split-Path -Parent $PSScriptRoot
+$data = if ($Data -ne "") { $Data } else { Join-Path ([System.IO.Path]::GetTempPath()) "basalt-test-data" }
+$results = Join-Path $data "computer\0\basalt-test-results.txt"
+
+New-Item -ItemType Directory -Force $data | Out-Null
+if (Test-Path $results) { Remove-Item $results }
+
+$emuArgs = @(
+  "--headless",
+  "-d", $data,
+  "--mount-ro", "/basalt=$repo",
+  "--script", (Join-Path $repo "tests\emulator-startup.lua")
+)
+if ($Suite -ne "") { $emuArgs += @("--args", $Suite) }
+
+# Headless output is a raw screen dump; the suite writes its results to a file
+& $Emulator @emuArgs | Out-Null
+
+if (-not (Test-Path $results)) {
+  Write-Error "No results file: the emulator or the runner failed before writing results."
+}
+$text = Get-Content $results -Raw
+Write-Output $text
+# -cmatch: case-sensitive, so the "0 failed" summary doesn't count
+if ($text -cmatch "(?m)^(FAILED |runner crashed)") { exit 1 }
+exit 0

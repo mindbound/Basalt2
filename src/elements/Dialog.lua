@@ -130,19 +130,20 @@ end
 local function addButtons(self, box, buttons, contentY)
     local totalWidth = 0
     for _, buttonDef in ipairs(buttons) do
-        totalWidth = totalWidth + #buttonDef[1] + 2 + 1
+        totalWidth = totalWidth + textutil.width(buttonDef[1]) + 2 + 1
     end
     local x = math.max(2, math.floor((box.width - totalWidth + 1) / 2) + 1)
     for _, buttonDef in ipairs(buttons) do
         local label, onPress = buttonDef[1], buttonDef[2]
+        local labelWidth = textutil.width(label)
         box:addButton({
             x = x, y = contentY + 1,
-            width = #label + 2, height = 1,
+            width = labelWidth + 2, height = 1,
             text = label,
         }):onClick(function()
             onPress()
         end)
-        x = x + #label + 3
+        x = x + labelWidth + 3
     end
 end
 

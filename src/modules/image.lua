@@ -8,18 +8,59 @@
 -- A bimg is a list of frames; every frame is a list of {text, fgHex, bgHex}
 -- blit triples. FLIMG stores RGB palette indices and either terminal cells or
 -- unbaked 2x3 pixels. Both render through the retained Render buffer.
+--
+-- Image text (BIMG lines, FLIMG cell text) is CC-charset bytes, one byte
+-- per cell, like term.blit takes it. With the Unicode Support mod it is
+-- turned into the characters the mod draws (text.fromLegacy), so "\233"
+-- shows as "é"; a BIMG line whose text has more bytes than its colour
+-- planes but as many cells is taken as UTF-8 and drawn as it is. FLIMG
+-- text is always CC-charset bytes: image.fromBimg converts such UTF-8 lines
+-- with text.toLegacy, flimg.fromBimg rejects them. Colour planes are bytes
+-- and are never measured with `#`.
 
 local require = ...
 local class = require("core/class")
 local Element = require("core/element")
 local Container = require("core/container")
 local palette = require("core/palette")
+local textutil = require("core/text")
 local flimg = require("flimg")
+
+local byteLen, isPlain = textutil.byteLen, textutil.isPlain
 
 ---@class image
 ---@field Image Image Registered Image element class
 ---@field flimg table FLIMG codec API
 local image = {}
+
+--- Whether a BIMG line's text is UTF-8 instead of CC-charset bytes. Only
+--- with the Unicode mod: a line whose text has more bytes than its fg plane
+--- but exactly as many cells was written as UTF-8 (by hand).
+---@param line table {text, fgHex, bgHex}
+---@return boolean
+local function isUtf8Line(line)
+    local str, fg = line[1], line[2]
+    if not textutil.isUtf8() or type(str) ~= "string" or type(fg) ~= "string"
+        or isPlain(str) then
+        return false
+    end
+    local planeLen = byteLen(fg)
+    return planeLen ~= byteLen(str) and textutil.width(str) == planeLen
+end
+
+--- The text of a BIMG line in the form Render draws, and its width in
+--- cells. BIMG text is CC-charset bytes (one per cell); a UTF-8 line (see
+--- isUtf8Line) is kept as UTF-8.
+---@param line table {text, fgHex, bgHex}
+---@return string text, integer width
+local function bimgText(line)
+    local str = line[1]
+    if not textutil.isUtf8() or isPlain(str) then return str, byteLen(str) end
+    if isUtf8Line(line) then
+        return textutil.normalize(str), byteLen(line[2])
+    end
+    return textutil.fromLegacy(str), byteLen(str)
+end
 
 local function frameSize(frame)
     if frame and frame.format == "FLIMG" then
@@ -27,7 +68,8 @@ local function frameSize(frame)
         return frame.width, frame.height
     end
     if not frame or not frame[1] then return 0, 0 end
-    return #frame[1][1], #frame
+    local _, w = bimgText(frame[1])
+    return w, #frame
 end
 
 local function frameCount(source)
@@ -175,13 +217,15 @@ function Image:render(buf)
             for y = 1, math.min(#rows, self.height) do
                 local line = rows[y]
                 local fg, bg = {}, {}
-                for x = 1, #line[1] do
+                for x = 1, byteLen(line[1]) do
                     local fi, bi = line[2]:byte(x), line[3]:byte(x)
                     fg[x] = fi == 0 and "\0" or bimg._basaltPalette[fi]
                     bg[x] = bi == 0 and "\0" or bimg._basaltPalette[bi]
                 end
-                buf:maskedBlit(1, y, line[1], table.concat(fg), table.concat(bg),
-                    line[1], line[2], line[3])
+                -- The cell text is CC-charset bytes ("\0" = transparent);
+                -- the masks stay one byte per cell
+                buf:maskedBlit(1, y, textutil.fromLegacy(line[1]),
+                    table.concat(fg), table.concat(bg), line[1], line[2], line[3])
             end
         end
         return
@@ -190,7 +234,7 @@ function Image:render(buf)
     if not frame then return end
     for y = 1, math.min(#frame, self.height) do
         local line = frame[y]
-        buf:drawBlit(1, y, line[1], line[2], line[3])
+        buf:drawBlit(1, y, (bimgText(line)), line[2], line[3])
     end
 end
 
@@ -216,6 +260,38 @@ end
 
 function image.saveFlimg(path, source, options)
     return flimg.save(path, source, options)
+end
+
+--- Converts a BIMG table to a cell-mode FLIMG image, like flimg.fromBimg,
+--- but also takes the lines that the Image element draws as UTF-8: with the
+--- Unicode Support mod, a line whose text has more bytes than its fg plane
+--- but as many cells is first converted to CC-charset bytes with
+--- basalt.text.toLegacy. Characters that are not in the CC charset become
+--- "?". Without the mod this is flimg.fromBimg.
+---@param bimg table BIMG table (frames of {text, fgHex, bgHex} lines)
+---@return table image Normalized cell-mode FLIMG image
+---@usage local logo = image.fromBimg(image.load("logo.bimg"))
+function image.fromBimg(bimg)
+    if not textutil.isUtf8() or type(bimg) ~= "table" then
+        return flimg.fromBimg(bimg)
+    end
+    local converted = {}
+    for key, value in pairs(bimg) do converted[key] = value end
+    for i = 1, #bimg do
+        local frame = bimg[i]
+        if type(frame) == "table" then
+            local lines = {}
+            for key, value in pairs(frame) do lines[key] = value end
+            for y = 1, #frame do
+                local line = frame[y]
+                if type(line) == "table" and isUtf8Line(line) then
+                    lines[y] = { textutil.toLegacy(line[1]), line[2], line[3] }
+                end
+            end
+            converted[i] = lines
+        end
+    end
+    return flimg.fromBimg(converted)
 end
 
 Container.register("Image", Image)

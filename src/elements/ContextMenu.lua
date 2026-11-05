@@ -12,6 +12,7 @@
 local require = ...
 local class = require("core/class")
 local Collection = require("elements/Collection")
+local textutil = require("core/text")
 
 ---@class ContextMenu : Collection
 ---@field public separatorColor number Separator color
@@ -29,7 +30,7 @@ class.property(ContextMenu, "width", function(self)
     local w = 4
     for _, item in ipairs(self.items) do
         if not (type(item) == "table" and item.separator) then
-            w = math.max(w, #tostring(item) + 2)
+            w = math.max(w, textutil.width(tostring(item)) + 2)
         end
     end
     return w
@@ -126,12 +127,12 @@ function ContextMenu:render(buf)
         elseif row == highlighted and not item.disabled then
             buf:fill(1, row, w, 1, " ",
                 self.selectionForeground, self.selectionBackground)
-            buf:blit(2, row, tostring(item):sub(1, w - 2),
+            buf:blit(2, row, textutil.sub(tostring(item), 1, w - 2),
                 self.selectionForeground, self.selectionBackground)
         else
             local itemFg = item.fg or fg
             buf:fill(1, row, w, 1, " ", fg, bg)
-            buf:blit(2, row, tostring(item):sub(1, w - 2), itemFg, bg)
+            buf:blit(2, row, textutil.sub(tostring(item), 1, w - 2), itemFg, bg)
         end
     end
 end

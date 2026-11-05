@@ -4,6 +4,7 @@ local require = ...
 local class = require("core/class")
 local Collection = require("elements/Collection")
 local itemview = require("core/itemview")
+local textutil = require("core/text")
 
 ---@class List : Collection
 ---@field public offset number Item offset above the viewport
@@ -172,9 +173,9 @@ function List:render(buf)
     local items = self.items
     local w, h = self.width, self.height
 
-    if #items == 0 and #tostring(self.emptyText) > 0 then
-        local label = tostring(self.emptyText):sub(1, w)
-        buf:blit(math.floor((w - #label) / 2) + 1,
+    if #items == 0 and tostring(self.emptyText) ~= "" then
+        local label = textutil.sub(tostring(self.emptyText), 1, w)
+        buf:blit(math.floor((w - textutil.width(label)) / 2) + 1,
             math.floor((h - 1) / 2) + 1, label, self.emptyTextColor, nil)
         return
     end
@@ -189,30 +190,33 @@ function List:render(buf)
     ---@param rowBackground number|false
     local function drawIcon(item, row, selected, rowBackground)
         local icon = item.iconChar
-        if type(icon) == "number" then icon = string.char(icon) end
-        if type(icon) ~= "string" or #icon == 0 then return end
+        -- 0-255: a CC-charset glyph; above that a Unicode character with
+        -- the Unicode Support mod, else "?"
+        if type(icon) == "number" then icon = textutil.char(icon) end
+        if type(icon) ~= "string" or icon == "" then return end
         local x = math.floor(tonumber(item.iconX) or 1)
         if x < 1 or x > textWidth then return end
         local foreground = selected and item.selectedIconForeground
             or item.iconForeground or rowBackground
         local background = selected and item.selectedIconBackground
             or item.iconBackground
-        buf:blit(x, row, icon:sub(1, 1), foreground, background)
+        buf:blit(x, row, textutil.sub(icon, 1, 1), foreground, background)
     end
     for row = 1, h do
         local idx = off + row
         local item = items[idx]
         if item == nil then break end
-        local text = tostring(item)
+        local label = tostring(item)
         if item.separator then
-            local symbol = text ~= "" and text:sub(1, 1) or "-"
+            -- the first cell repeated across the row (one cell per copy)
+            local symbol = label ~= "" and textutil.sub(label, 1, 1) or "-"
             buf:blit(1, row, symbol:rep(textWidth),
                 item.fg or self.foreground, item.bg)
         elseif self:isSelected(idx) then
             local foreground = item.selectedFg or self.selectionForeground
             local background = item.selectedBg or self.selectionBackground
             buf:fill(1, row, textWidth, 1, " ", foreground, background)
-            buf:blit(1, row, text:sub(1, textWidth), foreground, background)
+            buf:blit(1, row, textutil.sub(label, 1, textWidth), foreground, background)
             drawIcon(item, row, true, background)
         else
             local foreground = item.fg or self.foreground
@@ -220,7 +224,7 @@ function List:render(buf)
             if background then
                 buf:fill(1, row, textWidth, 1, " ", foreground, background)
             end
-            buf:blit(1, row, text:sub(1, textWidth), foreground, background)
+            buf:blit(1, row, textutil.sub(label, 1, textWidth), foreground, background)
             drawIcon(item, row, false, background or self.background)
         end
     end

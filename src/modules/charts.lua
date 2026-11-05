@@ -20,6 +20,7 @@ local class = require("core/class")
 local Element = require("core/element")
 local Container = require("core/container")
 local palette = require("core/palette")
+local textutil = require("core/text")
 
 ---@class charts
 ---@field Graph Graph Registered Graph element class
@@ -65,8 +66,8 @@ function Graph:setup()
     rawset(self, "_series", {})
 end
 
---- opts: symbol (default " "), fg, bg, pointCount (default width),
---- visible (default true)
+--- opts: symbol (its first cell is used; default " "), fg, bg,
+--- pointCount (default width), visible (default true)
 --- Adds a named graph series.
 ---@param name string Series name
 ---@param opts? table symbol/fg/bg/pointCount/visible options
@@ -76,7 +77,8 @@ function Graph:addSeries(name, opts)
     local series = rawget(self, "_series")
     series[#series + 1] = {
         name = name,
-        symbol = (opts.symbol or " "):sub(1, 1),
+        -- one screen cell: a whole UTF-8 character with the Unicode mod
+        symbol = textutil.sub(textutil.normalize(opts.symbol or " "), 1, 1),
         fg = opts.fg or colors.white,
         bg = opts.bg or colors.white,
         pointCount = opts.pointCount or self.width,

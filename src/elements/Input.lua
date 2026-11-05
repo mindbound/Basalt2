@@ -1,41 +1,57 @@
 -- Input: single-line text input with cursor, horizontal scrolling and
 -- placeholder. Fires "change" while typing and "enter" on return.
+--
+-- Cursor and scroll positions are screen cells (see core/text): with the
+-- "CC: Tweaked Unicode Support" mod a UTF-8 character is one cell, so text
+-- is measured with text.width, cut with text.sub and edited with
+-- text.splice. Typed and pasted text is converted with text.fromInput.
 
 local require = ...
 local class = require("core/class")
 local Element = require("core/element")
+local textutil = require("core/text")
+
+local cellWidth, cellSub = textutil.width, textutil.sub
+local normalize, splice = textutil.normalize, textutil.splice
 
 ---@class Input : Element
 ---@field public text string Current input value
 ---@field public placeholder string Placeholder shown while empty and unfocused
 ---@field public placeholderColor number Placeholder color
----@field public maxLength number|false Maximum length, or false when unlimited
+---@field public maxLength number|false Maximum length in characters, or false when unlimited
 ---@field public replaceChar string|false Replacement character for password input
----@field public pattern string|false Lua pattern accepted by inserted characters
+---@field public pattern string|false Lua pattern each inserted character must match
 ---@field onChange fun(self: Input, fn: ElementEventHandler<Input>): Input
 ---@field onEnter fun(self: Input, fn: ElementEventHandler<Input>): Input
----@field package _cursor integer One-based insertion position
----@field package _scroll integer Horizontal text offset
+---@field package _cursor integer One-based insertion position (cell)
+---@field package _scroll integer Horizontal text offset (cells)
 local Input = class.create("Input", Element)
 
 --- Current input value (rawString: typed braces stay literal text)
 class.property(Input, "text", "", {
     rawString = true, -- user-typed text must never compile as reactive
     onChange = function(self, v)
+        -- store the drawing form (identity without the Unicode mod), so
+        -- cells never merge when the text is edited
+        if type(v) == "string" then
+            local stored = normalize(v)
+            if stored ~= v then rawget(self, "_p").text = stored end
+        end
         -- keep cursor valid when text is replaced programmatically
         local cur = rawget(self, "_cursor")
-        if cur and cur > #v + 1 then
-            rawset(self, "_cursor", #v + 1)
-            rawset(self, "_scroll", math.max(0, #v + 1 - self.width))
+        local n = v == nil and 0 or cellWidth(v)
+        if cur and cur > n + 1 then
+            rawset(self, "_cursor", n + 1)
+            rawset(self, "_scroll", math.max(0, n + 1 - self.width))
         end
     end,
 })
 class.property(Input, "placeholder", "") -- shown while empty and unfocused
 --- Color of the placeholder text
 class.property(Input, "placeholderColor", colors.gray)
-class.property(Input, "maxLength", false) -- maximum text length, false = unlimited
+class.property(Input, "maxLength", false) -- maximum text length in characters, false = unlimited
 class.property(Input, "replaceChar", false) -- e.g. "*" for password fields
-class.property(Input, "pattern", false)     -- Lua pattern each char must match
+class.property(Input, "pattern", false)     -- Lua pattern each typed character must match
 -- class-level defaults so themes can restyle inputs
 --- Width in terminal cells
 class.property(Input, "width", 12)
@@ -51,10 +67,17 @@ class.event(Input, "change")
 --- Fired on the enter key with the current text
 class.event(Input, "enter")
 
+--- The current text as a string in its drawing form.
+---@param self Input
+---@return string
+local function currentText(self)
+    return normalize(self.text)
+end
+
 --- Initializes per-instance state and input handlers.
 function Input:setup()
     Element.setup(self)
-    rawset(self, "_cursor", 1) -- insert position, 1..#text+1
+    rawset(self, "_cursor", 1) -- insert position in cells, 1..width(text)+1
     rawset(self, "_scroll", 0)
 
     self:on("click", function(s, _, x, y)
@@ -66,9 +89,9 @@ function Input:setup()
 end
 
 --- Moves the insertion cursor and keeps it inside the visible text slice.
----@param pos number New one-based insertion position
+---@param pos number New one-based insertion position (cell)
 function Input:_moveCursor(pos)
-    local n = #self.text
+    local n = cellWidth(self.text)
     if pos < 1 then pos = 1 end
     if pos > n + 1 then pos = n + 1 end
     rawset(self, "_cursor", pos)
@@ -82,21 +105,27 @@ function Input:_moveCursor(pos)
 end
 
 --- Inserts text at the cursor after applying pattern and length constraints.
----@param str string Text to insert
+--- The pattern is matched against each whole character (with the Unicode
+--- mod a UTF-8 character is several bytes; %a, %w etc. are ASCII-only).
+---@param str string Text to insert (already converted with text.fromInput)
 function Input:_insert(str)
+    str = normalize(str)
     local pattern = self.pattern
     if pattern then -- keep only characters matching the pattern
-        str = str:gsub(".", function(ch)
-            return ch:match(pattern) and ch or ""
-        end)
-        if #str == 0 then return end
+        local kept = {}
+        for _, ch in ipairs(textutil.cells(str)) do
+            if ch:match(pattern) then kept[#kept + 1] = ch end
+        end
+        str = table.concat(kept)
+        if str == "" then return end
     end
-    local text = self.text
+    local value = currentText(self)
     local max = self.maxLength
-    if max and #text + #str > max then return end
+    local added = cellWidth(str)
+    if max and cellWidth(value) + added > max then return end
     local c = self._cursor
-    self.text = text:sub(1, c - 1) .. str .. text:sub(c)
-    self:_moveCursor(c + #str)
+    self.text = splice(value, c, c - 1, str)
+    self:_moveCursor(c + added)
     self:fire("change", self.text)
 end
 
@@ -106,19 +135,19 @@ end
 ---@param b? any Secondary key-event value
 function Input:handleKey(event, a, b)
     if event == "char" or event == "paste" then
-        self:_insert(a)
+        if type(a) == "string" then self:_insert(textutil.fromInput(a)) end
     elseif event == "key" then
         local c = self._cursor
-        local text = self.text
         if a == keys.backspace then
             if c > 1 then
-                self.text = text:sub(1, c - 2) .. text:sub(c)
+                self.text = splice(currentText(self), c - 1, c - 1, "")
                 self:_moveCursor(c - 1)
                 self:fire("change", self.text)
             end
         elseif a == keys.delete then
-            if c <= #text then
-                self.text = text:sub(1, c - 1) .. text:sub(c + 1)
+            local value = currentText(self)
+            if c <= cellWidth(value) then
+                self.text = splice(value, c, c, "")
                 self:fire("change", self.text)
             end
         elseif a == keys.left then
@@ -128,9 +157,9 @@ function Input:handleKey(event, a, b)
         elseif a == keys.home then
             self:_moveCursor(1)
         elseif a == keys["end"] then
-            self:_moveCursor(#text + 1)
+            self:_moveCursor(cellWidth(self.text) + 1)
         elseif a == keys.enter then
-            self:fire("enter", text)
+            self:fire("enter", self.text)
         end
     end
     Element.handleKey(self, event, a, b)
@@ -142,15 +171,17 @@ function Input:render(buf)
     Element.render(self, buf)
     local root = self:getRoot()
     local focused = root.getFocused and root:getFocused() == self
-    local text = self.text
+    local value = currentText(self)
     local w = self.width
 
-    if #text == 0 and not focused then
-        buf:blit(1, 1, self.placeholder:sub(1, w), self.placeholderColor, nil)
+    if value == "" and not focused then
+        buf:blit(1, 1, cellSub(self.placeholder, 1, w), self.placeholderColor, nil)
     else
-        local visible = text:sub(self._scroll + 1, self._scroll + w)
+        local visible = cellSub(value, self._scroll + 1, self._scroll + w)
         local rc = self.replaceChar
-        if rc then visible = tostring(rc):sub(1, 1):rep(#visible) end
+        if rc then
+            visible = cellSub(normalize(rc), 1, 1):rep(cellWidth(visible))
+        end
         buf:blit(1, 1, visible, self.foreground, nil)
     end
 
@@ -163,7 +194,7 @@ end
 ---@return number width The measured width
 ---@return number height The measured height
 function Input:measure()
-    return math.max(1, #tostring(self.text), #tostring(self.placeholder)), 1
+    return math.max(1, cellWidth(self.text), cellWidth(self.placeholder)), 1
 end
 
 return Input

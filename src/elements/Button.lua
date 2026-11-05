@@ -5,6 +5,7 @@
 local require = ...
 local class = require("core/class")
 local Element = require("core/element")
+local textutil = require("core/text")
 
 ---@class Button : Element
 ---@field public text any Label rendered with `tostring`
@@ -30,7 +31,7 @@ function Button:render(buf)
     if bg then buf:fill(1, 1, w, h, " ", fg, bg) end
     local t = tostring(self.text)
     buf:blit(
-        math.floor((w - #t) / 2) + 1,
+        math.floor((w - textutil.width(t)) / 2) + 1,
         math.floor((h - 1) / 2) + 1,
         t, fg, bg or nil
     )
@@ -41,7 +42,7 @@ end
 ---@return number height The measured height
 ---@usage local btn = frame:addButton({ width = basalt.auto(), text = "Ok" })
 function Button:measure()
-    return math.max(3, #tostring(self.text) + 2), 3
+    return math.max(3, textutil.width(tostring(self.text)) + 2), 3
 end
 
 return Button

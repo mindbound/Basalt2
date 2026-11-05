@@ -1,6 +1,9 @@
 -- Canvas: a single custom-painted surface.
 -- The draw callback receives (canvas, renderBuffer) and paints in local
 -- coordinates. This avoids building large trees of tiny visual elements.
+-- Coordinates and sizes are screen cells. With the Unicode Support mod a cell
+-- can be a multi-byte UTF-8 character: measure drawn text with
+-- basalt.text.width, not #, and give rawBlit/drawBlit planes one byte per cell.
 
 local require = ...
 local class = require("core/class")

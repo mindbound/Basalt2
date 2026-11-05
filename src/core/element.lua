@@ -724,7 +724,10 @@ function Element:handleMouse(event, btn, x, y)
     return nil
 end
 
---- Handles a keyboard event (element must be focused).
+--- Handles a keyboard event (element must be focused). The text of char and
+--- paste events is the raw event payload; with the Unicode Support mod it
+--- mixes CC-charset bytes and UTF-8, so convert it once with
+--- basalt.text.fromInput before storing or measuring it.
 ---@param event string Keyboard event name
 ---@param a any Key code or text
 ---@param b? any Secondary event value

@@ -1,7 +1,10 @@
 -- BigFont module: registers the BigFont element (large text via teletext
 -- drawing characters). Font engine by Wojbie (see license below), element
 -- wrapper rewritten for Basalt 2. Font sizes 1-3; colors may be any
--- colors.* value or basalt.rgb() handle.
+-- colors.* value or basalt.rgb() handle. The engine is altered for Basalt:
+-- colors are buffer bytes (core/palette) and text is read by screen cells
+-- (core/text), so with the Unicode Support mod a UTF-8 character finds its
+-- CC-charset glyph.
 --
 --   basalt.use("bigfont")
 --   frame:addBigFont({ x = 2, y = 2, text = "Hi!", fontSize = 2 })
@@ -11,6 +14,11 @@ local class = require("core/class")
 local Element = require("core/element")
 local Container = require("core/container")
 local palette = require("core/palette")
+local textutil = require("core/text")
+
+-- Glyph rows hold one byte per cell (spaces and drawing characters), so
+-- they are measured in bytes: `#` counts characters under the Unicode mod.
+local byteLen = textutil.byteLen
 
 -- charOf maps any Basalt color (including rgb handles) to the buffer's
 -- byte encoding; the font engine only substitutes single characters, so
@@ -35,7 +43,7 @@ local firstFont = {}
 do
     local char = 0
     local height = #rawFont[1]
-    local length = #rawFont[1][1]
+    local length = byteLen(rawFont[1][1])
     for i = 1, height, 3 do
         for j = 1, length, 3 do
             local thisChar = string.char(char)
@@ -73,7 +81,7 @@ local function generateFontSize(size,yeld)
             local templateBack = lastFont[thisChar][2]
             for i = 1, #templateChar do
                 local line1, line2, line3, back1, back2, back3 = {}, {}, {}, {}, {}, {}
-                for j = 1, #templateChar[1] do
+                for j = 1, byteLen(templateChar[1]) do
                     local currentChar = firstFont[templateChar[i]:sub(j, j)][1]
                     table.insert(line1, currentChar[1])
                     table.insert(line2, currentChar[2])
@@ -115,8 +123,11 @@ local function makeText(nSize, sString, nFC, nBC, bBlit)
     local font = fonts[nSize] or error("Wrong font size selected",3)
     if sString == "" then return {{""}, {""}, {""}} end
 
+    -- One glyph per CC-charset byte: toLegacy gives one byte per cell (a
+    -- UTF-8 "\195\169" becomes "\233", characters outside the CC charset
+    -- become "?"). Without the Unicode mod it returns the text unchanged.
     local input = {}
-    for i in sString:gmatch('.') do table.insert(input, i) end
+    for i in textutil.toLegacy(sString):gmatch('.') do table.insert(input, i) end
 
     local tText = {}
     local height = #font[input[1]][1]
@@ -159,7 +170,7 @@ end
 ---@field public fontSize integer Scale from 1 to 3
 local BigFont = class.create("BigFont", Element)
 
---- Displayed text
+--- Displayed text (characters outside the CC charset are drawn as "?")
 class.property(BigFont, "text", "BigFont")
 --- Scale 1-3 (one character is 3x3 cells at size 1)
 class.property(BigFont, "fontSize", 1, {
@@ -173,7 +184,7 @@ class.property(BigFont, "fontSize", 1, {
 --- Width in terminal cells
 class.property(BigFont, "width", function(self)
     local lines = self:getBigText()[1]
-    return math.max(1, #(lines[1] or ""))
+    return math.max(1, byteLen(lines[1] or ""))
 end)
 --- Height in terminal cells
 class.property(BigFont, "height", function(self)
@@ -202,7 +213,7 @@ end
 ---@return number height The measured height
 function BigFont:measure()
     local data = self:getBigText()
-    return math.max(1, #(data[1][1] or "")), math.max(1, #data[1])
+    return math.max(1, byteLen(data[1][1] or "")), math.max(1, #data[1])
 end
 
 --- Renders the element into the buffer.

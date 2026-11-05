@@ -106,6 +106,45 @@ label.x = 4
 - [`examples/showcase.lua`](examples/showcase.lua) is the full animated
   Basalt 2.5 feature showcase.
 
+## Unicode text
+
+With the "CC: Tweaked Unicode Support" mod installed, the terminal draws
+UTF-8: one character is one cell, even
+when it takes several bytes. Basalt detects the mod and then measures,
+cuts, wraps and edits text in cells, so labels, lists, tables and inputs
+show and edit UTF-8 correctly. Characters typed or pasted in CC's own
+charset (such as `é`) are stored as UTF-8. Without the mod nothing changes:
+a cell is a byte.
+
+For your own drawing code (for example in a `Canvas`), use the same helpers
+instead of `#` and `string.sub`, which count bytes (or, under the mod,
+characters only when the whole string is valid UTF-8):
+
+```lua
+local text = basalt.text
+text.width(s)          -- width in cells
+text.sub(s, i, j)      -- substring by cells
+text.pad(s, n, align)  -- cut or pad to n cells
+text.wrap(s, width)    -- word wrap by cells
+```
+
+## Testing
+
+The headless test suite runs in [CraftOS-PC](https://www.craftos-pc.cc/)
+(CI runs it on pushes and pull requests to `basalt2.5`) or in-game on a
+computer without the Unicode Support mod:
+
+```sh
+basalt/tests/run              # all suites
+basalt/tests/run test_text    # one suite
+```
+
+From Windows: `tests\run.ps1 -Emulator <path to CraftOS-PC_console.exe>`.
+The suite simulates the Unicode Support mod (`tests/modsim.lua`). On a
+computer that has the mod, run `basalt/tests/mod-check` instead: it
+compares Basalt's cell counts with the mod's own terminal and draws a test
+UI on the native terminal, whose blit rejects any row of the wrong width.
+
 ## Documentation
 
 - [Getting started](https://basalt.madefor.cc/2.5/guides/getting-started)

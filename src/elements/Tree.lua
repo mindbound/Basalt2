@@ -8,6 +8,7 @@ local require = ...
 local class = require("core/class")
 local Element = require("core/element")
 local itemview = require("core/itemview")
+local textutil = require("core/text")
 
 ---@class TreeNode
 ---@field text? any Display value rendered with `tostring`
@@ -238,7 +239,7 @@ function Tree:setExpandedNodes(expanded)
     return self
 end
 
---- Measures the currently visible flattened node tree.
+--- Measures the currently visible flattened node tree (width in cells).
 ---@return number width
 ---@return number height
 function Tree:getNodeSize()
@@ -246,13 +247,13 @@ function Tree:getNodeSize()
     local width = 1
     for _, entry in ipairs(flat) do
         width = math.max(width,
-            entry.depth + 2 + #tostring(entry.node.text or "Node"))
+            entry.depth + 2 + textutil.width(tostring(entry.node.text or "Node")))
     end
     return width, #flat
 end
 
 --- Sets and clamps the horizontal text offset.
----@param offset number Horizontal character offset
+---@param offset number Horizontal offset in cells
 ---@return self
 function Tree:setHorizontalOffset(offset)
     local width = self:getNodeSize()
@@ -457,7 +458,7 @@ function Tree:measure()
     local flat = flatten(self)
     local w = 1
     for i = 1, #flat do
-        w = math.max(w, flat[i].depth + 3 + #tostring(flat[i].node.text))
+        w = math.max(w, flat[i].depth + 3 + textutil.width(tostring(flat[i].node.text)))
     end
     return w, math.max(1, #flat)
 end
@@ -478,15 +479,16 @@ function Tree:render(buf)
         local node = entry.node
         local marker = node.children and (node.expanded and "- " or "+ ") or "  "
         local line = string.rep(" ", entry.depth) .. marker .. tostring(node.text)
-        line = line:sub(self.horizontalOffset + 1,
+        -- the visible window of at most tw cells
+        line = textutil.sub(line, self.horizontalOffset + 1,
             self.horizontalOffset + tw)
         if node == sel then
             buf:fill(1, row, tw, 1, " ",
                 self.selectionForeground, self.selectionBackground)
-            buf:blit(1, row, line:sub(1, tw),
+            buf:blit(1, row, line,
                 self.selectionForeground, self.selectionBackground)
         else
-            buf:blit(1, row, line:sub(1, tw), self.foreground, nil)
+            buf:blit(1, row, line, self.foreground, nil)
         end
     end
     itemview.draw(buf, self.width, 1, g, self.foreground,

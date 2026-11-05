@@ -3,6 +3,7 @@
 local require = ...
 local class = require("core/class")
 local Element = require("core/element")
+local textutil = require("core/text")
 
 ---@alias ProgressBarDirection "right"|"left"|"up"|"down"
 
@@ -53,7 +54,7 @@ function ProgressBar:render(buf)
 
     if self.showPercentage then
         local label = math.floor(pr + 0.5) .. "%"
-        buf:drawText(math.floor((w - #label) / 2) + 1,
+        buf:drawText(math.floor((w - textutil.width(label)) / 2) + 1,
             math.floor((h - 1) / 2) + 1, label)
     end
 end

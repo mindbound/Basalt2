@@ -16,7 +16,7 @@ local CollectionEntry = require("core/collectionentry")
 ---@field bg? number Background color
 ---@field selectedFg? number Foreground color while selected
 ---@field selectedBg? number Background color while selected
----@field iconChar? string|number Optional single-cell icon
+---@field iconChar? string|number Optional single-cell icon; a number is a character code (0-255 CC charset, higher codes need the Unicode mod, else "?")
 ---@field iconX? number Horizontal icon position
 ---@field iconForeground? number Icon foreground color
 ---@field iconBackground? number Icon background color

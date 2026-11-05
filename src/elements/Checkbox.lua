@@ -3,6 +3,7 @@
 local require = ...
 local class = require("core/class")
 local Element = require("core/element")
+local textutil = require("core/text")
 
 ---@class Checkbox : Element
 ---@field public checked boolean Whether the checkbox is selected
@@ -22,7 +23,7 @@ class.property(Checkbox, "checkedSymbol", "x") -- single character inside [ ]
 class.property(Checkbox, "uncheckedSymbol", " ")
 --- Auto-sizes to the label until set explicitly
 class.property(Checkbox, "width", function(self)
-    return #tostring(self.text) + 4
+    return textutil.width(tostring(self.text)) + 4
 end)
 
 --- Fired after every toggle with the new checked state
@@ -42,7 +43,8 @@ end
 function Checkbox:render(buf)
     Element.render(self, buf)
     local symbol = self.checked and self.checkedSymbol or self.uncheckedSymbol
-    buf:blit(1, 1, "[" .. tostring(symbol):sub(1, 1) .. "] "
+    -- the first cell of the symbol: a whole UTF-8 character with the mod
+    buf:blit(1, 1, "[" .. textutil.sub(tostring(symbol), 1, 1) .. "] "
         .. tostring(self.text), self.foreground, nil)
 end
 

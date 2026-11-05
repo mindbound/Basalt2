@@ -41,7 +41,7 @@ class.property(Toast, "toastColors", false) -- type -> {bg, fg}; setup default
 class.property(Toast, "width", function(self)
     local w = 1
     for _, line in ipairs(rawget(self, "_lines") or { "" }) do
-        w = math.max(w, #line)
+        w = math.max(w, textutil.width(line))
     end
     return w + 2
 end)

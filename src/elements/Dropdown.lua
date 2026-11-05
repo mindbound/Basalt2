@@ -5,6 +5,7 @@ local require = ...
 local class = require("core/class")
 local Collection = require("elements/Collection")
 local itemview = require("core/itemview")
+local textutil = require("core/text")
 
 ---@class Dropdown : Collection
 ---@field public text any Placeholder rendered with `tostring`
@@ -230,7 +231,7 @@ function Dropdown:render(buf)
     buf:fill(1, 1, w, 1, " ", fg, bg)
     local title = (sel and items[sel] ~= nil)
         and tostring(items[sel]) or tostring(self.text)
-    buf:blit(1, 1, title:sub(1, w - 2), fg, bg)
+    buf:blit(1, 1, textutil.sub(title, 1, w - 2), fg, bg)
     buf:blit(w, 1, self.open and "\30" or "\31", fg, bg)
 
     if self.open then
@@ -246,7 +247,7 @@ function Dropdown:render(buf)
             local rbg = isSel and (item and item.selectedBg or self.selectionBackground)
                 or (item and item.bg or self.dropBackground)
             buf:fill(1, 1 + row, textWidth, 1, " ", rfg, rbg)
-            buf:blit(1, 1 + row, tostring(item or ""):sub(1, textWidth), rfg, rbg)
+            buf:blit(1, 1 + row, textutil.sub(tostring(item or ""), 1, textWidth), rfg, rbg)
         end
         itemview.draw(buf, w, 2, geometry, fg,
             self.scrollbarColor, self.scrollbarThumbColor)

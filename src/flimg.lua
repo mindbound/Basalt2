@@ -3,6 +3,14 @@
 -- The on-disk format uses palette-indexed byte planes, independently encoded
 -- frame patches, and periodic keyframes. It deliberately avoids textutils and
 -- string.pack so the same module works on Lua 5.1/CraftOS-PC and CC:Tweaked.
+--
+-- Every plane is a byte string with one byte per cell or pixel; cell text is
+-- CC-charset bytes (convert UTF-8 text with basalt.text.toLegacy first).
+-- flimg.fromBimg is as strict: a BIMG line whose text is UTF-8 (possible
+-- with the Unicode Support mod) is rejected; image.fromBimg converts such
+-- lines. Lengths are counted in bytes with byteLen, never with `#`: with the
+-- "CC: Tweaked Unicode Support" mod, `#` counts UTF-8 characters whenever the
+-- bytes happen to form valid UTF-8.
 
 local flimg = {
     VERSION = 1,
@@ -13,8 +21,13 @@ local flimg = {
     ENCODING_RLE = 1,
 }
 
-local char, byte, sub, rep = string.char, string.byte, string.sub, string.rep
+local char, byte, sub, rep, find = string.char, string.byte, string.sub, string.rep, string.find
 local floor, min, max = math.floor, math.min, math.max
+
+-- Byte length of s (string.find is byte-based in every Lua and with the mod)
+local function byteLen(s)
+    return (select(2, find(s, "$")))
+end
 
 local MODE_TO_BYTE = { pixel = 1, cell = 2 }
 local BYTE_TO_MODE = { [1] = "pixel", [2] = "cell" }
@@ -64,7 +77,7 @@ local Reader = {}
 Reader.__index = Reader
 
 function Reader.new(data)
-    return setmetatable({ data = data, pos = 1, size = #data }, Reader)
+    return setmetatable({ data = data, pos = 1, size = byteLen(data) }, Reader)
 end
 
 function Reader:take(length, label)
@@ -121,7 +134,7 @@ local function parseRGB(value, label)
 end
 
 local function validatePaletteBytes(row, startIndex, label, paletteCount)
-    local i, length = startIndex or 1, #row
+    local i, length = startIndex or 1, byteLen(row)
     while i + 7 <= length do
         local a, b, c, d, e, f, g, h = byte(row, i, i + 7)
         local invalid = a > paletteCount and a or b > paletteCount and b
@@ -140,7 +153,8 @@ end
 
 local function normalizePixelRow(row, width, label, paletteCount)
     if type(row) == "string" then
-        if #row ~= width then fail(label .. " has width " .. #row .. ", expected " .. width, 2) end
+        local length = byteLen(row)
+        if length ~= width then fail(label .. " has width " .. length .. ", expected " .. width, 2) end
         validatePaletteBytes(row, 1, label, paletteCount)
         return row
     end
@@ -162,7 +176,7 @@ local function normalizeCellRow(row, width, label, paletteCount)
     if type(row) ~= "table" then fail(label .. " must be {text, foreground, background}", 2) end
     local text, fg, bg = row[1] or row.text, row[2] or row.fg, row[3] or row.bg
     if type(text) ~= "string" or type(fg) ~= "string" or type(bg) ~= "string"
-        or #text ~= width or #fg ~= width or #bg ~= width then
+        or byteLen(text) ~= width or byteLen(fg) ~= width or byteLen(bg) ~= width then
         fail(label .. " planes must be byte strings of width " .. width, 2)
     end
     validatePaletteBytes(fg, 1, label .. " foreground", paletteCount)
@@ -217,7 +231,7 @@ local function normalizeImage(source)
         local layer = sourceLayers[i]
         if type(layer) ~= "table" then fail("layer " .. i .. " must be a table", 2) end
         local name = layer.name or ("Layer " .. i)
-        if type(name) ~= "string" or #name > 255 then fail("layer " .. i .. " name is too long", 2) end
+        if type(name) ~= "string" or byteLen(name) > 255 then fail("layer " .. i .. " name is too long", 2) end
         layers[i] = {
             name = name,
             x = integer(layer.x or 1, "layer " .. i .. " x", -32768, 32767),
@@ -296,7 +310,7 @@ end
 --- PackBits encoder. Repeated runs of at least three bytes are compressed.
 function flimg.rleEncode(data)
     if type(data) ~= "string" then fail("rleEncode expects a string", 2) end
-    local out, length, i = {}, #data, 1
+    local out, length, i = {}, byteLen(data), 1
     while i <= length do
         local value = byte(data, i)
         local run = 1
@@ -346,8 +360,9 @@ function flimg.rleDecode(data, expectedLength)
         if expectedLength and produced > expectedLength then fail("RLE output exceeds expected length", 2) end
     end
     local result = table.concat(out)
-    if expectedLength and #result ~= expectedLength then
-        fail("RLE produced " .. #result .. " bytes, expected " .. expectedLength, 2)
+    local resultLength = byteLen(result)
+    if expectedLength and resultLength ~= expectedLength then
+        fail("RLE produced " .. resultLength .. " bytes, expected " .. expectedLength, 2)
     end
     return result
 end
@@ -399,11 +414,12 @@ end
 local function encodePatch(layerIndex, x1, y1, x2, y2, raw)
     local compressed = flimg.rleEncode(raw)
     local encoding, payload = flimg.ENCODING_RAW, raw
-    if #compressed < #raw then encoding, payload = flimg.ENCODING_RLE, compressed end
+    local rawLength = byteLen(raw)
+    if byteLen(compressed) < rawLength then encoding, payload = flimg.ENCODING_RLE, compressed end
     return table.concat({
         u8(layerIndex), u16(x1 - 1), u16(y1 - 1),
         u16(x2 - x1 + 1), u16(y2 - y1 + 1), u8(encoding),
-        u32(#raw), u32(#payload), payload,
+        u32(rawLength), u32(byteLen(payload)), payload,
     })
 end
 
@@ -435,7 +451,7 @@ function flimg.encode(source, options)
         frameEntries[frameIndex] = {
             duration = image.frames[frameIndex].duration,
             keyframe = keyframe,
-            length = #payload,
+            length = byteLen(payload),
         }
     end
 
@@ -452,7 +468,7 @@ function flimg.encode(source, options)
     for i = 1, #image.layers do
         local layer = image.layers[i]
         header[#header + 1] = table.concat({
-            u8(#layer.name), layer.name, i16(layer.x), i16(layer.y),
+            u8(byteLen(layer.name)), layer.name, i16(layer.x), i16(layer.y),
             u16(layer.width), u16(layer.height), i16(layer.z),
             u8(layer.visible and 1 or 0),
         })
@@ -470,7 +486,7 @@ end
 
 local function replaceSpan(source, startIndex, replacement)
     return sub(source, 1, startIndex - 1) .. replacement
-        .. sub(source, startIndex + #replacement)
+        .. sub(source, startIndex + byteLen(replacement))
 end
 
 local function applyPatch(mode, rows, x, y, width, height, raw)
@@ -594,7 +610,7 @@ function flimg.decode(data)
             local raw
             if encoding == flimg.ENCODING_RAW then
                 raw = payload
-                if #raw ~= rawLength then fail("raw patch length mismatch", 2) end
+                if byteLen(raw) ~= rawLength then fail("raw patch length mismatch", 2) end
             elseif encoding == flimg.ENCODING_RLE then
                 raw = flimg.rleDecode(payload, rawLength)
             else
@@ -667,7 +683,7 @@ end
 function flimg.save(path, image, options)
     local data = flimg.encode(image, options)
     writeFile(path, data)
-    return #data
+    return byteLen(data)
 end
 
 local function overlaySpan(target, source, targetX, sourceX, length)
@@ -732,11 +748,17 @@ local function addPaletteColor(palette, lookup, rgb)
 end
 
 --- Converts a legacy BIMG table to a cell-mode FLIMG image.
+-- BIMG text must be CC-charset bytes, one per cell, and is stored as it is;
+-- a line whose text is longer or shorter than its colour planes is rejected.
+-- With the Unicode Support mod, a BIMG line may hold UTF-8 text (more bytes
+-- than cells): convert it with basalt.text.toLegacy first, or use
+-- image.fromBimg, which does that for the lines the Image element draws as
+-- UTF-8.
 function flimg.fromBimg(bimg)
     if type(bimg) ~= "table" or type(bimg[1]) ~= "table" or type(bimg[1][1]) ~= "table" then
         fail("invalid BIMG table", 2)
     end
-    local width, height = #bimg[1][1][1], #bimg[1]
+    local width, height = byteLen(bimg[1][1][1]), #bimg[1]
     local palette, lookup = {}, {}
     local function fromBlit(value)
         local index = tonumber(value, 16)
@@ -748,7 +770,16 @@ function flimg.fromBimg(bimg)
         if #sourceFrame ~= height then fail("BIMG frame dimensions differ", 2) end
         for y = 1, height do
             local line = sourceFrame[y]
-            if type(line) ~= "table" or #line[1] ~= width or #line[2] ~= width or #line[3] ~= width then
+            if type(line) ~= "table" then fail("invalid BIMG line", 2) end
+            local text, fgHex, bgHex = line[1], line[2], line[3]
+            if byteLen(text) ~= width or byteLen(fgHex) ~= width or byteLen(bgHex) ~= width then
+                -- Planes that agree with each other but not with the text:
+                -- the text is not one byte per cell (UTF-8, with the mod)
+                if type(fgHex) == "string" and type(bgHex) == "string"
+                    and byteLen(fgHex) == byteLen(bgHex) and byteLen(text) ~= byteLen(fgHex) then
+                    fail("BIMG line text must be CC-charset bytes, one per cell"
+                        .. " (convert UTF-8 with basalt.text.toLegacy)", 2)
+                end
                 fail("invalid BIMG line", 2)
             end
             local fg, bg = {}, {}
@@ -797,7 +828,7 @@ function flimg.fromSprite(sprite, options)
     local function colorIndex(value)
         if value == nil or value == false or value == " " or value == "" then return 0 end
         if options.resolveColor then value = options.resolveColor(value) end
-        if type(value) == "string" and #value == 1 then
+        if type(value) == "string" and byteLen(value) == 1 then
             local native = tonumber(value, 16)
             if native then return addPaletteColor(palette, lookup, NATIVE_RGB[native]) end
         end
@@ -821,7 +852,7 @@ function flimg.fromSprite(sprite, options)
             local chars, foregrounds, backgrounds = {}, {}, {}
             for x = 1, width do
                 local glyph = rowCell(charRow, x)
-                if type(glyph) ~= "string" or #glyph ~= 1 then fail("invalid sprite character", 2) end
+                if type(glyph) ~= "string" or byteLen(glyph) ~= 1 then fail("invalid sprite character", 2) end
                 chars[x] = glyph == " " and "\0" or glyph
                 foregrounds[x] = char(colorIndex(rowCell(fgRow, x)))
                 backgrounds[x] = char(colorIndex(rowCell(bgRow, x)))

@@ -18,7 +18,7 @@ local function reflow(self)
     local p = rawget(self, "_p")
     if rawget(self, "_autoSize") then
         if type(p.width) ~= "function" then
-            p.width = math.max(#tostring(self.text), 1)
+            p.width = math.max(textutil.width(tostring(self.text)), 1)
         end
         return
     end
@@ -70,11 +70,11 @@ function Label:render(buf)
     end
 end
 
---- Intrinsic size for basalt.auto(): text length x 1.
+--- Intrinsic size for basalt.auto(): text width (in cells) x 1.
 ---@return number width The measured width
 ---@return number height The measured height
 function Label:measure()
-    return math.max(1, #tostring(self.text)), 1
+    return math.max(1, textutil.width(tostring(self.text))), 1
 end
 
 return Label

@@ -5,6 +5,7 @@ local require = ...
 local class = require("core/class")
 local Container = require("core/container")
 local Frame = require("elements/Frame")
+local textutil = require("core/text")
 
 ---@alias TabControlSpan [number, number, string]
 
@@ -45,7 +46,7 @@ class.property(TabControl, "height", 10)
 --- Fired after a tab switch with (index, title)
 class.event(TabControl, "change")
 
---- Returns {x1, x2, label} for every tab title, in local coordinates.
+--- Returns {x1, x2, label} for every tab title, in local cell coordinates.
 ---@param self TabControl
 ---@return TabControlSpan[] spans
 local function spans(self)
@@ -53,8 +54,9 @@ local function spans(self)
     local x = 1
     for i, tab in ipairs(rawget(self, "_tabs")) do
         local label = " " .. tab.title .. " "
-        out[i] = { x, x + #label - 1, label }
-        x = x + #label
+        local labelWidth = textutil.width(label)
+        out[i] = { x, x + labelWidth - 1, label }
+        x = x + labelWidth
     end
     return out
 end

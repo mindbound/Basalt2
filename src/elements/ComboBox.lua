@@ -1,12 +1,26 @@
 -- ComboBox: an Input with an attached dropdown list.
 -- With autoComplete = true the list filters while typing (case-insensitive
 -- prefix match). Fires "select"(itemIndex, item) plus everything Input fires.
+-- Text is measured and cut in screen cells (see core/text and Input).
 
 local require = ...
 local class = require("core/class")
 local Input = require("elements/Input")
 local itemview = require("core/itemview")
 local collection = require("core/collection")
+local textutil = require("core/text")
+
+--- Case folding for the auto-complete match: with the Unicode mod
+--- text.lower (keeps UTF-8 intact), otherwise string.lower as before.
+---@param s string|number
+---@return string
+local function fold(s)
+    s = tostring(s)
+    if textutil.isUtf8() and not textutil.isPlain(s) then
+        return textutil.lower(textutil.normalize(s))
+    end
+    return s:lower()
+end
 
 ---@class ComboBoxDisplayEntry
 ---@field index integer Original collection index
@@ -70,10 +84,12 @@ class.property(ComboBox, "open", false, {
 function ComboBox:getDisplayItems()
     local items = self.items
     local out = {}
-    local needle = self.autoComplete and self.text:lower() or ""
+    local needle = self.autoComplete and fold(self.text) or ""
+    -- both sides are folded drawing forms, so a byte prefix is a cell prefix
+    local needleBytes = textutil.byteLen(needle)
     for i = 1, #items do
         local label = tostring(items[i])
-        if #needle == 0 or label:lower():sub(1, #needle) == needle then
+        if needle == "" or fold(label):sub(1, needleBytes) == needle then
             out[#out + 1] = { index = i, text = label, item = items[i] }
         end
     end
@@ -106,7 +122,7 @@ function ComboBox:selectDisplayed(displayIndex)
     rawset(self, "_selecting", true)
     self.text = entry.text
     rawset(self, "_selecting", nil)
-    self:_moveCursor(#entry.text + 1)
+    self:_moveCursor(textutil.width(self.text) + 1)
     self.open = false
     self:activateItem(entry.index)
     return self
@@ -156,7 +172,7 @@ function ComboBox:setup()
     end)
     self:on("change", function(s)
         if s.autoComplete and not rawget(s, "_selecting") then
-            s.open = #s:getDisplayItems() > 0 and #s.text > 0
+            s.open = #s:getDisplayItems() > 0 and textutil.width(s.text) > 0
             rawset(s, "_highlighted", 1)
             s.offset = 0
         end
@@ -237,7 +253,7 @@ function ComboBox:render(buf)
             local fg = isHl and self.selectionForeground or self.dropForeground
             local bg = isHl and self.selectionBackground or self.dropBackground
             buf:fill(1, 1 + row, textWidth, 1, " ", fg, bg)
-            buf:blit(1, 1 + row, entry.text:sub(1, textWidth), fg, bg)
+            buf:blit(1, 1 + row, textutil.sub(entry.text, 1, textWidth), fg, bg)
         end
         itemview.draw(buf, w, 2, g, self.foreground,
             self.scrollbarColor, self.scrollbarThumbColor)

@@ -17,14 +17,33 @@
 -- registered element works. Attribute values are converted: numbers,
 -- true/false, "#RRGGBB" -> basalt.rgb, "{...}" stays reactive, everything
 -- else is a string. on* attributes bind functions from the scope table.
+--
+-- With the Unicode Support mod, text between tags may use numeric
+-- character references: &#233; and &#xE9; give é, &#x2014; an em dash.
+-- Without the mod, text is kept as written. Attribute values are always
+-- kept as written.
 
 local require = ...
 local palette = require("core/palette")
+local textutil = require("core/text")
 
 local xml = {}
 
 local function trim(s)
     return s:match("^%s*(.-)%s*$")
+end
+
+--- Replaces numeric character references (&#NNN; and &#xHHHH;) with the
+--- character (see textutil.char).
+---@param s string
+---@return string
+local function decodeReferences(s)
+    if not textutil.isUtf8() or not s:find("&#", 1, true) then return s end
+    return (s:gsub("&#([xX]?)(%x+);", function(hex, digits)
+        local code = tonumber(digits, hex ~= "" and 16 or 10)
+        if not code then return nil end -- hex digits without the x: kept
+        return textutil.char(code)
+    end))
 end
 
 --- Parses an XML string into a tree of {tag, attrs, children, text} nodes.
@@ -39,10 +58,11 @@ function xml.parse(src)
         local lt = src:find("<", pos, true)
         if not lt then break end
 
-        local text = trim(src:sub(pos, lt - 1))
-        if #text > 0 then
+        local content = trim(src:sub(pos, lt - 1))
+        if content ~= "" then
+            content = decodeReferences(content)
             local top = stack[#stack]
-            top.text = top.text and (top.text .. " " .. text) or text
+            top.text = top.text and (top.text .. " " .. content) or content
         end
 
         if src:sub(lt + 1, lt + 3) == "!--" then

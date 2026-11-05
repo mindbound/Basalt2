@@ -186,6 +186,10 @@ function BaseFrame:handleEvent(event, a, b, c)
         self:_updateHovered(b, c)
     elseif event == "key" or event == "key_up" or event == "char"
         or event == "paste" then
+        -- char/paste text stays raw here: with the Unicode Support mod it
+        -- mixes legacy CC bytes and UTF-8, text.fromInput is not idempotent,
+        -- and Program must forward the native payload. Elements that store
+        -- typed text convert it once (Input, TextBox).
         local f = rawget(self, "_focused")
         if f and f ~= self then f:handleKey(event, a, b) end
     elseif event == "term_resize" then

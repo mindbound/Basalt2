@@ -51,6 +51,20 @@ jobs:
             --mount-ro "basalt=$GITHUB_WORKSPACE/src" \
             --exec "local ok=shell.run('basalt/main.lua'); os.shutdown(ok and 0 or 1)"
 
+      - name: Run the test suite
+        run: |
+          mkdir -p "$RUNNER_TEMP/craftos-tests"
+          craftos \
+            --headless \
+            --directory "$RUNNER_TEMP/craftos-tests" \
+            --mount-ro "basalt=$GITHUB_WORKSPACE" \
+            --exec "shell.run('basalt/tests/run.lua'); os.shutdown()"
+          results="$RUNNER_TEMP/craftos-tests/computer/0/basalt-test-results.txt"
+          cat "$results"
+          if grep -Eq '^(FAILED |runner crashed)' "$results"; then
+            exit 1
+          fi
+
       - name: Build release bundles
         run: |
           mkdir -p "$RUNNER_TEMP/basalt-output"

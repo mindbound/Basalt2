@@ -11,6 +11,7 @@
 local require = ...
 local class = require("core/class")
 local Collection = require("elements/Collection")
+local textutil = require("core/text")
 
 ---@alias MenuSpan [number, number, string]
 
@@ -50,7 +51,7 @@ local function submenuItems(item)
     return type(item) == "table" and (item.items or item.dropdown) or nil
 end
 
---- Returns {x1, x2, label} per item plus the total width.
+--- Returns {x1, x2, label} per item plus the total width, in cells.
 ---@param self Menu
 ---@return MenuSpan[] spans
 ---@return number width
@@ -60,8 +61,9 @@ local function spans(self)
     for i, item in ipairs(self.items) do
         local label = isSeparator(item)
             and labelOf(item) or (" " .. labelOf(item) .. " ")
-        out[i] = { x, x + #label - 1, label }
-        x = x + #label + self.spacing
+        local labelWidth = textutil.width(label)
+        out[i] = { x, x + labelWidth - 1, label }
+        x = x + labelWidth + self.spacing
     end
     return out, math.max(1, x - self.spacing - 1)
 end
@@ -77,7 +79,7 @@ local function submenuBox(self)
     local itemSpans = spans(self)
     local w = 1
     for _, sub in ipairs(children) do
-        w = math.max(w, #tostring(sub) + 2)
+        w = math.max(w, textutil.width(tostring(sub)) + 2)
     end
     local x = math.min(itemSpans[index][1], math.max(1, self.width - w + 1))
     return { x = x, width = w, items = children, parent = index }
@@ -234,7 +236,7 @@ function Menu:render(buf)
         for row, sub in ipairs(box.items) do
             buf:fill(box.x, 1 + row, box.width, 1, " ", fg, self.dropBackground)
             buf:blit(box.x + 1, 1 + row,
-                tostring(sub):sub(1, box.width - 2), fg, self.dropBackground)
+                textutil.sub(tostring(sub), 1, box.width - 2), fg, self.dropBackground)
         end
     end
 end

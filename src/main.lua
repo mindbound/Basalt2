@@ -50,10 +50,16 @@ Container.register("Toast", require("elements/Toast"))
 ---@field fill fun(weight?: number): LayoutValue Creates a weighted fill layout value
 ---@field percent fun(amount: number): LayoutValue Creates a fractional parent-size value
 ---@field debug? fun(...: any) Logger installed by `basalt.use("debug")`
+---@field text table Screen-cell text helpers (width, sub, wrap, ...); UTF-8 aware with the Unicode Support mod
 local basalt = {}
 basalt.VERSION = "2.5.0-dev"
 basalt.traceback = true
 basalt.errors = errors
+
+--- Text helpers that measure and cut in screen cells. Use them instead of
+--- `#` and string.sub for text you draw: with the "CC: Tweaked Unicode
+--- Support" mod a cell can be a multi-byte UTF-8 character (see core/text).
+basalt.text = require("core/text")
 
 --- Registers a custom RGB color; returns a handle usable like a colors.*
 --- value. Accepts "#RRGGBB", "#RGB", "#AARRGGBB", 0xRRGGBB or r,g,b.
